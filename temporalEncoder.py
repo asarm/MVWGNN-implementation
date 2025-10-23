@@ -15,6 +15,7 @@ class TemporalEncoder(nn.Module):
     def __init__(self, input_dim=7, hidden_dim=64, seq_len=168):
         super().__init__()
         self.seq_len = seq_len
+        self.hidden_dim = hidden_dim
         
         # ========== Multi-scale Temporal Convolutions ==========
         # Dilated convolutions capture patterns at different timescales
@@ -119,7 +120,7 @@ class TemporalEncoder(nn.Module):
         
         
         # ========== Final projection ==========
-        temporal_features = self.output_proj(temporal_repr[:, :2*hidden_dim])
+        temporal_features = self.output_proj(temporal_repr[:, :2*self.hidden_dim])
         # Shape: (n_stations, hidden_dim)
         
         return temporal_features

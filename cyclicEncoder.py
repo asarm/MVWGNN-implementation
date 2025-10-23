@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+import math
 
 class CyclicTemporalEncoding(nn.Module):
     """
@@ -60,10 +61,10 @@ class CyclicTemporalEncoding(nn.Module):
         day_of_year = day_of_year.float().to(device)
         
         # Create cyclic features (fixed, no parameters)
-        hourly_cyclic = self._create_cyclic_features(hour, period=24)
+        hourly_cyclic = self._create_cyclic_features(hour, period=24, device=device)
         # Shape: (batch_size, 2 * n_harmonics)
         
-        annual_cyclic = self._create_cyclic_features(day_of_year, period=365.25)
+        annual_cyclic = self._create_cyclic_features(day_of_year, period=365.25, device=device)
         # Shape: (batch_size, 2 * n_harmonics)
         
         # Concatenate all cyclic features
@@ -75,6 +76,3 @@ class CyclicTemporalEncoding(nn.Module):
         # Shape: (batch_size, hidden_dim)
         
         return temporal_embed
-
-
-import math

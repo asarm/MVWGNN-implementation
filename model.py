@@ -1,11 +1,11 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-from .temporalEncoder import TemporalEncoder
-from .adjLearner import TemporalAdjacencyLearner
-from .positionalEncoding import SpatialPositionalEncoding
-from .cyclicEncoder import CyclicTemporalEncoding
-from .directionalGAT import DirectionalGAT
+from temporalEncoder import TemporalEncoder
+from adjLearner import TemporalAdjacencyLearner
+from positionalEncoding import SpatialPositionalEncoding
+from cyclicEncoder import CyclicTemporalEncoding
+from directionalGAT import DirectionalGAT
 
 class DDGNNWind(nn.Module):
     """
@@ -38,8 +38,8 @@ class DDGNNWind(nn.Module):
         
         # Encode time (hour of day, day of year)
         self.temporal_cyclic = nn.ModuleDict({
+            '1h': CyclicTemporalEncoding(hidden_dim, n_harmonics=3),
             '3h': CyclicTemporalEncoding(hidden_dim, n_harmonics=3),
-            '6h': CyclicTemporalEncoding(hidden_dim, n_harmonics=3),
             '12h': CyclicTemporalEncoding(hidden_dim, n_harmonics=3),
             '24h': CyclicTemporalEncoding(hidden_dim, n_harmonics=3)
         })
@@ -62,12 +62,12 @@ class DDGNNWind(nn.Module):
         # ========== MULTI-HORIZON DECODERS ==========
         
         self.decoder_heads = nn.ModuleDict({
-            '3h': nn.Sequential(
+            '1h': nn.Sequential(
                 nn.Linear(hidden_dim, hidden_dim),
                 nn.ReLU(),
                 nn.Linear(hidden_dim, 1)
             ),
-            '6h': nn.Sequential(
+            '3h': nn.Sequential(
                 nn.Linear(hidden_dim, hidden_dim),
                 nn.ReLU(),
                 nn.Linear(hidden_dim, 1)
@@ -100,7 +100,7 @@ class DDGNNWind(nn.Module):
             positions: (n_stations, 2) optional for directional modulation
         
         Returns:
-            predictions: dict with keys '3h', '6h', '12h', '24h'
+            predictions: dict with keys '1h', '3h', '12h', '24h'
                 Each value is (n_stations, 1) with predicted wind speed
         """
         
@@ -121,7 +121,7 @@ class DDGNNWind(nn.Module):
         # =========== STEP 3: Loop over forecast horizons ===========
         predictions = {}
         
-        for horizon in ['3h', '6h', '12h', '24h']:
+        for horizon in ['1h', '3h', '12h', '24h']:
             
             # --------- STEP 3a: Horizon-specific temporal context ---------
             # Different forecast horizons emphasize different temporal patterns
