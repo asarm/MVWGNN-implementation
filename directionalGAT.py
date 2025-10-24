@@ -62,7 +62,7 @@ class DirectionalGAT(nn.Module):
         
         # Mask with learned adjacency
         adjacency_mask = adjacency.unsqueeze(0)  # (1, n_stations, n_stations)
-        scores = scores + torch.log(adjacency_mask + 1e-8)  # -inf where no edge
+        scores = scores + torch.log(adjacency_mask + 1e-8)
         
         # Attention weights
         attention = torch.softmax(scores, dim=-1)
