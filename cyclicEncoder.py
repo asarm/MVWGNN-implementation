@@ -30,16 +30,12 @@ class CyclicTemporalEncoding(nn.Module):
     def _create_cyclic_features(self, value, period, device):
         """
         Create sine/cosine features at multiple frequencies.
-        
-        For value in [0, period), creates:
-        [sin(2π*1*v/p), cos(2π*1*v/p), sin(2π*2*v/p), cos(2π*2*v/p), ...]
-        
-        These are fixed (no parameters) - just mathematical transformations.
+        These are fixed
         """
         value = value.float().to(device)
         features = []
         for harmonic in range(1, self.n_harmonics + 1):
-            freq = 2 * math.pi * harmonic / period
+            freq = 2 * math.pi * harmonic / period # 2*p for converting radians, 
             features.append(torch.sin(value * freq))
             features.append(torch.cos(value * freq))
         
