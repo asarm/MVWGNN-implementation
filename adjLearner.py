@@ -89,9 +89,10 @@ class TemporalAdjacencyLearner(nn.Module):
             torch.randn(n_stations, 1) * 0.1
         )
     
-    def _compute_base_adjacency(self, temporal_embedding):
+    def _compute_base_adjacency(self, station_representations):
         """Compute asymmetric base adjacency matrix."""
-        
+        adj = station_representations @ station_representations.T
+        '''
         M1 = torch.tanh(self.node_embedding_1 + temporal_embedding)
         M2 = torch.tanh(self.node_embedding_2)
         
@@ -105,8 +106,8 @@ class TemporalAdjacencyLearner(nn.Module):
             self.station_bias_out +
             self.station_bias_in.T
         )
-        
-        return base_adjacency
+        '''
+        return adj
     
     def _apply_directional_modulation(self, adjacency, wind_directions, positions):
         """Modulate adjacency by wind direction."""
@@ -200,8 +201,8 @@ class TemporalAdjacencyLearner(nn.Module):
         
         return normalized
     
-    def forward(self, temporal_features, learned_representations, 
-                horizon='6h', positions=None, wind_directions=None):
+    def forward(self, temporal_features, station_representations, 
+                positions=None, wind_directions=None):
         """
         Learn adaptive adjacency matrix.
         
@@ -221,15 +222,11 @@ class TemporalAdjacencyLearner(nn.Module):
         n_stations = temporal_features.shape[0]
         
         # Project temporal features to embedding space
-        temporal_embedding = self.temporal_to_embedding(temporal_features)
+        # temporal_embedding = self.temporal_to_embedding(temporal_features)
         
         # Compute base asymmetric adjacency
-        base_adjacency = self._compute_base_adjacency(temporal_embedding)
-        
-        # Apply horizon-specific modulation
-        horizon_mod = self.horizon_modulation[horizon](temporal_embedding)
-        adjacency = base_adjacency * horizon_mod
-        
+        adjacency = self._compute_base_adjacency(temporal_features+station_representations)
+
         # Apply directional modulation
         if wind_directions is None:
             wind_directions = torch.ones(n_stations, device=device) * 270.0

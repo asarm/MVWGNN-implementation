@@ -29,22 +29,21 @@ lon = lon.to(device)
 wind_direction = wind_direction.to(device)
 positions = positions.to(device)
 
-current_hour = 14  # 2 PM
-day_of_year = 150  # May 30th
-
-# Forward pass
-predictions = model(
+# Forward pass (1-hour ahead prediction)
+prediction = model(
     historical_data,
     lat, lon,
-    current_hour, day_of_year,
     wind_direction_deg=wind_direction,
     positions=positions
 )
 
 # Print results
-print("Predictions:")
-for horizon, pred in predictions.items():
-    print(f"  {horizon}: shape {pred.shape}, mean {pred.mean():.3f}, std {pred.std():.3f}")
+print("1-Hour Ahead Wind Speed Prediction:")
+print(f"  Shape: {prediction.shape}")
+print(f"  Mean: {prediction.mean():.3f}")
+print(f"  Std: {prediction.std():.3f}")
+print(f"  Min: {prediction.min():.3f}")
+print(f"  Max: {prediction.max():.3f}")
 
 # Count parameters
 total_params = sum(p.numel() for p in model.parameters())
