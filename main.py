@@ -7,6 +7,9 @@ n_stations = 32
 seq_len = 24
 hidden_dim = 32
 
+current_hour = torch.tensor(11).to(device)  # 11 AM
+day_of_year = torch.tensor(150).to(device)  # May 30th
+
 model = DDGNNWind(
     n_stations=n_stations,
     hidden_dim=hidden_dim,
@@ -33,6 +36,7 @@ positions = positions.to(device)
 prediction = model(
     historical_data,
     lat, lon,
+    current_hour=current_hour, day_of_year=day_of_year,
     wind_direction_deg=wind_direction,
     positions=positions
 )
@@ -50,3 +54,5 @@ total_params = sum(p.numel() for p in model.parameters())
 trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"\nTotal parameters: {total_params:,}")
 print(f"Trainable parameters: {trainable_params:,}")
+
+print("Prediction tensor:", prediction)

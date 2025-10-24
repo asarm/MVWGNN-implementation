@@ -33,12 +33,16 @@ class CyclicTemporalEncoding(nn.Module):
         These are fixed
         """
         value = value.float().to(device)
+        # Ensure value has a batch dimension
+        if value.dim() == 0:
+            value = value.unsqueeze(0)
+            
         features = []
         for harmonic in range(1, self.n_harmonics + 1):
-            freq = 2 * math.pi * harmonic / period # 2*p for converting radians, 
+            freq = 2 * math.pi * harmonic / period # 2*p for converting radians, 
             features.append(torch.sin(value * freq))
             features.append(torch.cos(value * freq))
-        
+
         return torch.stack(features, dim=1)
     
     

@@ -5,7 +5,7 @@ from temporalEncoder import TemporalEncoder
 from adjLearner import TemporalAdjacencyLearner
 from positionalEncoding import SpatialPositionalEncoding
 from directionalGAT import DirectionalGAT
-from cyclicEncoder import CyclicTemporalEncoder
+from cyclicEncoder import CyclicTemporalEncoding
 
 class DDGNNWind(nn.Module):
     """
@@ -40,7 +40,7 @@ class DDGNNWind(nn.Module):
         self.hidden_dim = hidden_dim
         
         # ========== ENCODERS ==========
-        self.cyclic_encoder = CyclicTemporalEncoder(
+        self.cyclic_encoder = CyclicTemporalEncoding(
             hidden_dim=hidden_dim,
             n_harmonics=3
         )
@@ -104,6 +104,11 @@ class DDGNNWind(nn.Module):
         temporal_features = self.temporal_encoder(historical_data)
         # Shape: (n_stations, hidden_dim)
 
+        if current_hour is None:
+            current_hour = torch.tensor(0).to(device)  # Default to midnight
+        if day_of_year is None:
+            day_of_year = torch.tensor(1).to(device)  # Default to Jan 1st
+
         cyclic_embed = self.cyclic_encoder(
             hour=current_hour, day_of_year=day_of_year
         )
@@ -121,7 +126,6 @@ class DDGNNWind(nn.Module):
         adjacency = self.adjacency_learner(
             temporal_features,
             spatial_embed,
-            horizon='1h',
             positions=positions,
             wind_directions=wind_direction_deg
         )
