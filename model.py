@@ -2,38 +2,21 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from temporalEncoder import TemporalEncoder
-from adjLearner import TemporalAdjacencyLearner
+from adjLearner import DynamicAdjacencyLearner
 from positionalEncoding import SpatialPositionalEncoding
 from directionalGAT import DirectionalGAT
 from cyclicEncoder import CyclicTemporalEncoding
 
 class DDGNNWind(nn.Module):
     """
-    Directional Dynamic Graph Neural Network for Wind Speed Forecasting.
-    
-    SIMPLIFIED VERSION FOR 1-HOUR FORECASTING:
-    - Single horizon prediction (1 hour ahead)
-    - Removed multi-horizon architecture and cyclic encoders
-    - Focuses on immediate temporal dynamics
-    
-    Architecture:
-        Input: Historical data + spatial info
-            ↓
-        [Temporal + Spatial] Encoders (parallel)
-            ↓
-        [Fusion]
-            ↓
-        [Learn Adjacency from temporal_features]
-            ↓
-        [GNN Propagation]
-            ↓
-        [Decode Prediction]
-            ↓
-        Output: Wind speed prediction (1h ahead)
+    V3: Enhanced DDGNN with:
+    - Attention-based temporal encoding
+    - Dynamic adjacency learning (spatial + temporal)
+    - Better gradient flow
     """
     
     def __init__(self, n_stations=50, hidden_dim=64, n_heads=4, 
-                 seq_len=168, n_gnn_layers=3, input_dim=5, temporal_debug: bool = False):
+                 seq_len=24, n_gnn_layers=2, input_dim=5, temporal_debug: bool = False):
         super().__init__()
         
         self.n_stations = n_stations
@@ -46,6 +29,7 @@ class DDGNNWind(nn.Module):
             n_harmonics=3
         )
 
+        # V2: Attention-based temporal encoder
         self.temporal_encoder = TemporalEncoder(
             input_dim=input_dim,
             hidden_dim=hidden_dim, 
@@ -58,161 +42,138 @@ class DDGNNWind(nn.Module):
             n_stations=n_stations
         )
         
-        # ========== GRAPH LEARNING AND GNN ==========
-        
-        self.adjacency_learner = TemporalAdjacencyLearner(
+        # ========== DYNAMIC GRAPH LEARNING ==========
+        # V2: Uses both spatial and temporal features
+        self.adjacency_learner = DynamicAdjacencyLearner(
             hidden_dim=hidden_dim,
             n_stations=n_stations,
             embedding_dim=32,
-            sparsify_mode='top_p',      # variable edges per node based on mass
-            nucleus_p=0.7,              # keep minimum set covering 70% prob mass
-            temperature_scale=0.2       # slightly smoother distribution for stability
+            sparsify_mode='top_p',
+            nucleus_p=0.9,
+            temperature_scale=0.2
         )
         
+        # ========== GNN LAYERS ==========
         self.gnn_layers = nn.ModuleList([
-            DirectionalGAT(hidden_dim, hidden_dim, n_heads=n_heads, dropout=0.3)
+            DirectionalGAT(hidden_dim, hidden_dim, n_heads=n_heads, dropout=0.4)
             for _ in range(n_gnn_layers)
         ])
         
-        # Add batch normalization after each GNN layer
         self.gnn_norms = nn.ModuleList([
-            nn.BatchNorm1d(hidden_dim)
+            nn.LayerNorm(hidden_dim)  # LayerNorm for better stability
             for _ in range(n_gnn_layers)
         ])
         
-        # ========== SINGLE DECODER HEAD ==========
-        
-        # Multi-horizon decoder: outputs 1 prediction [1h ahead]
+        # ========== DECODER ==========
         self.decoder = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
-            nn.Dropout(0.2),  # Reduced dropout since we have BatchNorm
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.LayerNorm(hidden_dim // 2),
+            nn.Dropout(0.3),
             nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(hidden_dim, 1)  # 1 horizon: [1]
+            nn.Linear(hidden_dim // 2, 1)
         )
-        
-        # Learnable weight for blending spatial and temporal features in adjacency learning
-        self.temporal_weight = nn.Parameter(torch.tensor(0.5))
         
     def forward(self, historical_data, lat, lon, current_hour=None, day_of_year=None, 
                 wind_direction_deg=None, positions=None):
         """
-        Forward pass for multi-horizon wind speed forecasting.
+        Forward pass.
         
         Args:
             historical_data: (n_stations, seq_len, 5) or (B, n_stations, seq_len, 5)
-                - wind_speed, wind_dir_cos, wind_dir_sin, pressure, temp
-            lat: (n_stations,) or (B, n_stations,) normalized latitude
-            lon: (n_stations,) or (B, n_stations,) normalized longitude
-            current_hour: scalar or (B,) tensor
-            day_of_year: scalar or (B,) tensor
-            wind_direction_deg: (n_stations,) or (B, n_stations,) optional prevailing wind direction
-            positions: (n_stations, 2) or (B, n_stations, 2) optional for directional modulation
+            lat: (n_stations,) or (B, n_stations,)
+            lon: (n_stations,) or (B, n_stations,)
+            current_hour: scalar or (B,)
+            day_of_year: scalar or (B,)
+            wind_direction_deg: (n_stations,) or (B, n_stations,)
+            positions: (n_stations, 2) or (B, n_stations, 2)
         
         Returns:
-            predictions: (n_stations, 5) or (B, n_stations, 5) wind speed predictions for [1, 3, 6, 12, 24] hours ahead
+            predictions: (n_stations, 1) or (B, n_stations, 1)
         """
         
         device = historical_data.device
-
         is_batched = historical_data.dim() == 4
 
-        # =========== STAGE 1: Temporal encoding ===========
+        # =========== STAGE 1: Temporal encoding (with attention) ===========
         temporal_features = self.temporal_encoder(historical_data)
-        # temporal_features: (N, H) or (B, N, H)
 
-        # Ensure cyclic inputs exist
+        # Cyclic encoding
         if current_hour is None:
             current_hour = torch.tensor(0, device=device)
         if day_of_year is None:
             day_of_year = torch.tensor(1, device=device)
 
-        # cyclic encoder expects (batch,) inputs; if not batched, make batch of size 1
         if is_batched:
-            # current_hour/day_of_year should be (B,)
             cyclic_embed = self.cyclic_encoder(hour=current_hour, day_of_year=day_of_year)
-            # (B, H)
         else:
             cyclic_embed = self.cyclic_encoder(hour=current_hour, day_of_year=day_of_year)
-            # (1, H) or (H,) depending on cyclic encoder behavior
 
-        # =========== STAGE 2: Spatial encoding ==========
+        # =========== STAGE 2: Spatial encoding ===========
         spatial_embed = self.spatial_encoder(lat, lon, wind_direction_deg)
-        # spatial_embed: (N, H) or (B, N, H)
 
-        # =========== STAGE 3: Combine representations ==========
+        # =========== STAGE 3: Combine representations ===========
         if not is_batched:
-            # Everything is station-wise: (N, H)
-            # Ensure cyclic_embed is (H,) -> expand to (N, H)
             if cyclic_embed.dim() == 2 and cyclic_embed.shape[0] == 1:
                 cyc = cyclic_embed.squeeze(0)
             else:
                 cyc = cyclic_embed
 
             node_repr = temporal_features + spatial_embed + cyc
-            # =========== STAGE 4: Learn adaptive graph structure ==========
-            # CRITICAL FIX: Learn adjacency from SPATIAL features only, not temporal.
-            # This prevents the model from creating a graph based on feature similarity,
-            # which leads to the "lagging" prediction issue.
-            # UPDATED: Blend spatial and temporal for richer representations
-            combined_repr = spatial_embed + self.temporal_weight * temporal_features  # Learnable weight
+            
+            # =========== STAGE 4: Learn DYNAMIC adjacency ===========
+            # Key change: use BOTH spatial and temporal
             adjacency = self.adjacency_learner(
-                station_representations=combined_repr, 
+                spatial_features=spatial_embed,
+                temporal_features=temporal_features,
                 positions=positions, 
                 wind_directions=wind_direction_deg
             )
 
-            # =========== STAGE 5: Apply graph neural network ==========
+            # =========== STAGE 5: Apply GNN with PRE-NORM ===========
             gnn_output = node_repr
             for i, gnn_layer in enumerate(self.gnn_layers):
-                residual = gnn_output  # Save residual
-                gnn_output = gnn_layer(gnn_output, adjacency)
+                residual = gnn_output
                 gnn_output = self.gnn_norms[i](gnn_output)
+                gnn_output = gnn_layer(gnn_output, adjacency)
                 gnn_output = F.relu(gnn_output)
-                gnn_output = gnn_output + residual  # Add residual connection
+                gnn_output = gnn_output + residual
 
-            # =========== STAGE 6: Decode prediction ==========
+            # =========== STAGE 6: Decode ===========
             prediction = self.decoder(gnn_output)
-            return prediction  # (n_stations, 5)
+            return prediction
         else:
-            # Batched case: temporal_features (B,N,H), spatial_embed (B,N,H)
+            # Batched case
             B, N, H = temporal_features.shape
 
-            # cyclic_embed: (B,H) or (H,) -> make (B,1,H)
             if cyclic_embed.dim() == 1:
                 cyc = cyclic_embed.unsqueeze(0).expand(B, -1)
             else:
                 cyc = cyclic_embed
-            cyc = cyc.unsqueeze(1)  # (B,1,H)
+            cyc = cyc.unsqueeze(1)
 
             node_repr = temporal_features + spatial_embed + cyc
 
-            # adjacency: (B,N,N)
-            combined_repr = spatial_embed + self.temporal_weight * temporal_features
+            # Dynamic adjacency (batched)
             adjacency = self.adjacency_learner(
-                station_representations=combined_repr, positions=positions, wind_directions=wind_direction_deg
+                spatial_features=spatial_embed,
+                temporal_features=temporal_features,
+                positions=positions, 
+                wind_directions=wind_direction_deg
             )
 
-            # Apply GNN layers (batched)
+            # GNN (batched)
             gnn_output = node_repr
             for i, gnn_layer in enumerate(self.gnn_layers):
-                residual = gnn_output  # Save residual
-                gnn_output = gnn_layer(gnn_output, adjacency)
-                # BatchNorm expects (B, C) or (B, C, L), we have (B, N, H)
-                # Reshape to (B*N, H), apply norm, reshape back
-                B, N, H = gnn_output.shape
-                gnn_output = gnn_output.view(B * N, H)
+                residual = gnn_output
                 gnn_output = self.gnn_norms[i](gnn_output)
-                gnn_output = gnn_output.view(B, N, H)
+                gnn_output = gnn_layer(gnn_output, adjacency)
                 gnn_output = F.relu(gnn_output)
-                gnn_output = gnn_output + residual  # Add residual connection
+                gnn_output = gnn_output + residual
 
-            # Decode: (B,N,H) -> (B,N,1)
-            # Reshape for decoder with BatchNorm
+            # Decode (batched)
             B, N, H = gnn_output.shape
             gnn_flat = gnn_output.view(B * N, H)
             prediction_flat = self.decoder(gnn_flat)
             prediction = prediction_flat.view(B, N, 1)
-            # Return (B, N, 1)
+            
             return prediction

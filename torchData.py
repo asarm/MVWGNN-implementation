@@ -34,7 +34,8 @@ class GraphWeatherDataset(Dataset):
         self.prediction_window = prediction_window
         self.sliding_window = sliding_window
         # sliding step size (advance by half the sequence length)
-        self.step_size = max(1, self.seq_len // 2) if self.sliding_window else (self.seq_len + 1)
+        # self.step_size = max(1, self.seq_len // 2) if self.sliding_window else (self.seq_len + 1)
+        self.step_size = 6
 
         # feature order we will output per time-step per station (5 features)
         # wind_speed, wind_dir_cos, wind_dir_sin, pressure, temperature

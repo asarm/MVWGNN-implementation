@@ -1,60 +1,60 @@
 import torch
-import os
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-import numpy as np
 
-class TemporalAdjacencyLearner(nn.Module):
+class DynamicAdjacencyLearner(nn.Module):
     """
-    Learn dynamic graph structure from temporal patterns.
+    V2: Dynamic adjacency that changes based on BOTH spatial and temporal patterns.
     
-    KEY FIX: Now receives temporal_features directly (not raw data)
-    No redundant wind speed extraction!
+    Key improvements:
+    - Uses temporal features to modulate spatial adjacency
+    - Wind patterns affect connectivity strength
+    - Learns when to connect distant stations (teleconnections)
     """
     
     def __init__(self, hidden_dim=64, n_stations=50, embedding_dim=32,
-                 sparsity_threshold=0.1, temperature_scale=0.1,
-                 sparsify_mode: str = "quantile", nucleus_p: float = 0.9,
-                 prob_threshold: float = 0.0):
+                 sparsify_mode: str = "top_p", nucleus_p: float = 0.9,
+                 temperature_scale: float = 0.2):
         super().__init__()
         
         self.hidden_dim = hidden_dim
         self.n_stations = n_stations
         self.embedding_dim = embedding_dim
-        self.sparsity_threshold = sparsity_threshold
-        # Sparsification controls
-        # modes: 'quantile' (keep top-fraction per row), 'top_p' (nucleus), 'magnitude' (keep >= prob_threshold)
         self.sparsify_mode = sparsify_mode
         self.nucleus_p = nucleus_p
-        self.prob_threshold = prob_threshold
         
-        # Node embeddings (station-specific properties)
-        self.node_embedding_1 = nn.Parameter(
+        # ========== Spatial Embeddings (static) ==========
+        self.spatial_node_embedding = nn.Parameter(
             torch.randn(n_stations, embedding_dim)
         )
-        self.node_embedding_2 = nn.Parameter(
-            torch.randn(n_stations, embedding_dim)
-        )
-        nn.init.xavier_uniform_(self.node_embedding_1)
-        nn.init.xavier_uniform_(self.node_embedding_2)
+        nn.init.xavier_uniform_(self.spatial_node_embedding)
         
-        # Project features to embedding space
-        self.feature_to_embedding = nn.Sequential(
+        # ========== Temporal Modulation Network ==========
+        # This learns how temporal patterns affect connectivity
+        self.temporal_modulator = nn.Sequential(
             nn.Linear(hidden_dim, embedding_dim),
             nn.ReLU(),
-            nn.LayerNorm(embedding_dim)
+            nn.LayerNorm(embedding_dim),
+            nn.Linear(embedding_dim, embedding_dim),
+            nn.Tanh()  # Bounded output for stability
         )
         
-        # Directional influence
+        # ========== Directional Influence ==========
         self.directional_influence = nn.Sequential(
-            nn.Linear(3, 16),
+                                    nn.Linear(3, 16),
+                                    nn.ReLU(),
+                                    nn.Linear(16, 8),
+                                    nn.ReLU(),
+                                    nn.Linear(8, 1)
+                                    )
+        
+        # ========== Edge Weight Predictor ==========
+        # Predicts edge strength from combined node features
+        self.edge_predictor = nn.Sequential(
+            nn.Linear(embedding_dim * 2, embedding_dim),
             nn.ReLU(),
-            nn.LayerNorm(16),
-            nn.Linear(16, 8),
-            nn.ReLU(),
-            nn.Linear(8, 1),
-            nn.Sigmoid()
+            nn.Linear(embedding_dim, 1)
         )
         
         # Learnable temperature
@@ -62,300 +62,218 @@ class TemporalAdjacencyLearner(nn.Module):
             torch.tensor(temperature_scale)
         )
         
-        # Station biases
-        self.station_bias_out = nn.Parameter(
-            torch.randn(n_stations, 1) * 0.1
-        )
-        self.station_bias_in = nn.Parameter(
-            torch.randn(n_stations, 1) * 0.1
+        # Station-specific biases
+        self.station_bias = nn.Parameter(
+            torch.randn(n_stations, 1) * 0.01
         )
     
-    def _compute_base_adjacency(self, station_representations):
-        """Compute an asymmetric, learnable base adjacency.
-
-        Uses a learned projection of the input features plus two distinct
-        station embeddings (out/in) and station-specific biases to form
-        scaled dot-product logits. This avoids over-smoothing when temporal
-        features are nearly identical (which made cosine similarity saturate).
-
-        Supports inputs of shape (N, E) or (B, N, E).
+    def forward(self, spatial_features, temporal_features, 
+                positions=None, wind_directions=None):
         """
-        # Project to shared embedding space
-        # nn.Linear supports arbitrary leading dims; apply directly.
-        h = self.feature_to_embedding(station_representations)  # (..., N, D)
-
-        D = self.embedding_dim
-        scale = math.sqrt(D)
-
-        if h.dim() == 2:
-            # (N, D)
-            # Create distinct query/key representations for asymmetry
-            Q = h + self.node_embedding_1  # (N, D)
-            K = h + self.node_embedding_2  # (N, D)
-
-            # Scaled dot-product logits + station biases
-            logits = (Q @ K.T) / (scale + 1e-8)
-            logits = logits + self.station_bias_out + self.station_bias_in.T  # broadcast (N, N)
-
-            # Ensure positive scores to play well with later multiplicative modulation
-            adj = F.elu(logits) + 1.0  # >= 0
-            return adj
+        Learn dynamic adjacency from spatial and temporal features.
+        
+        Args:
+            spatial_features: (N, H) or (B, N, H) - spatial embeddings
+            temporal_features: (N, H) or (B, N, H) - temporal features
+            positions: (N, 2) or (B, N, 2) - lat/lon
+            wind_directions: (N,) or (B, N) - wind direction in degrees
+        
+        Returns:
+            adjacency: (N, N) or (B, N, N) - dynamic adjacency matrix
+        """
+        device = spatial_features.device
+        is_batched = spatial_features.dim() == 3
+        
+        if is_batched:
+            B, N, H = spatial_features.shape
         else:
-            # (B, N, D)
-            B, N, _ = h.shape
-            # Broadcast node embeddings and biases to batch
-            emb_out = self.node_embedding_1.unsqueeze(0).expand(B, -1, -1)  # (B, N, D)
-            emb_in = self.node_embedding_2.unsqueeze(0).expand(B, -1, -1)   # (B, N, D)
+            N = spatial_features.shape[0]
+        
+        # ========== STEP 1: Spatial base adjacency ==========
+        # Use static spatial embeddings as base
+        if is_batched:
+            spatial_emb = self.spatial_node_embedding.unsqueeze(0).expand(B, -1, -1)
+        else:
+            spatial_emb = self.spatial_node_embedding
+        
+        # Compute pairwise spatial affinity (using dot product)
+        if is_batched:
+            # (B, N, D) @ (B, D, N) -> (B, N, N)
+            spatial_adj = torch.bmm(spatial_emb, spatial_emb.transpose(1, 2))
+        else:
+            # (N, D) @ (D, N) -> (N, N)
+            spatial_adj = torch.mm(spatial_emb, spatial_emb.T)
+        
+        # Scale by embedding dimension
+        spatial_adj = spatial_adj / math.sqrt(self.embedding_dim)
+        
+        # ========== STEP 2: Temporal modulation ==========
+        # Learn how current temporal state affects connectivity
+        temporal_mod = self.temporal_modulator(temporal_features)
+        # (B, N, D) or (N, D)
+        
+        # Compute temporal similarity (stations with similar temporal patterns connect)
+        if is_batched:
+            temporal_adj = torch.bmm(temporal_mod, temporal_mod.transpose(1, 2))
+        else:
+            temporal_adj = torch.mm(temporal_mod, temporal_mod.T)
+        
+        temporal_adj = temporal_adj / math.sqrt(self.embedding_dim)
+        
+        # ========== STEP 3: Combine spatial and temporal ==========
+        # Learnable combination (start with 70% spatial, 30% temporal)
+        spatial_adj_norm = spatial_adj / (spatial_adj.std() + 1e-8)
+        temporal_adj_norm = temporal_adj / (temporal_adj.std() + 1e-8)
+        combined_adj = 0.7 * spatial_adj_norm + 0.3 * temporal_adj_norm
+        
+        # Add station biases
+        if is_batched:
+            bias = self.station_bias.squeeze(-1).unsqueeze(0).unsqueeze(-1)  # (1, N, 1)
+            combined_adj = combined_adj + bias  # Broadcast
+        else:
+            combined_adj = combined_adj + self.station_bias
+        
+        # ========== STEP 4: Directional modulation (if provided) ==========
+        if wind_directions is not None and positions is not None:
+            combined_adj = self._apply_directional_modulation(
+                combined_adj, wind_directions, positions
+            )
+        
+        # ========== STEP 5: Sparsify and normalize ==========
+        adjacency = self._sparsify_adjacency(combined_adj)
+        adjacency = self._add_self_loops(adjacency, self_loop_weight=0.1)
+        adjacency = self._normalize_adjacency(adjacency)
+        
+        # Debug statistics (properly handles batched case)
+        if torch.rand(1).item() < 0.01:  # Print 1% of the time to avoid spam
+            self._print_adjacency_stats(adjacency)
+        
+        return adjacency
+    
+    def _print_adjacency_stats(self, adjacency):
+        """Print adjacency statistics (handles both batched and non-batched)."""
+        with torch.no_grad():
+            if adjacency.dim() == 3:
+                # Batched: (B, N, N) - analyze first sample only
+                B, N, _ = adjacency.shape
+                adj = adjacency[0]  # First sample
+            else:
+                # Non-batched: (N, N)
+                N = adjacency.shape[0]
+                adj = adjacency
 
-            Q = h + emb_out  # (B, N, D)
-            K = h + emb_in   # (B, N, D)
-
-            # Batched matmul for logits
-            logits = torch.matmul(Q, K.transpose(-2, -1)) / (scale + 1e-8)  # (B, N, N)
-
-            b_out = self.station_bias_out.squeeze(-1)  # (N,)
-            b_in = self.station_bias_in.squeeze(-1)    # (N,)
-            logits = logits + b_out.unsqueeze(0).unsqueeze(-1) + b_in.unsqueeze(0).unsqueeze(-2)
-
-            adj = F.elu(logits) + 1.0  # (B, N, N), non-negative
-            return adj
+            # Edge statistics
+            non_zero = (adj > 1e-8).sum().item()
+            
+            # Row normalization check
+            row_sums = adj.sum(dim=-1)
+            
+            # Degree distribution
+            degrees = (adj > 1e-8).sum(dim=-1).float()
     
     def _apply_directional_modulation(self, adjacency, wind_directions, positions):
-        """Modulate adjacency by wind direction."""
-        # Vectorized implementation supporting adjacency shape (N,N) or (B,N,N)
+        """Modulate adjacency by wind direction (vectorized)."""
         device = adjacency.device
-
-        # Ensure wind_directions and positions have batch dim
+        is_batched = adjacency.dim() == 3
+        
+        # Ensure inputs have batch dimension
         if wind_directions.dim() == 1:
             wind_directions = wind_directions.unsqueeze(0)
         if positions.dim() == 2:
             positions = positions.unsqueeze(0)
-
-        # wind_directions: (B, N)
-        wind_dir_rad = torch.deg2rad(wind_directions)
-        wind_vectors = torch.stack([torch.cos(wind_dir_rad), torch.sin(wind_dir_rad)], dim=-1)
+        
+        B = wind_directions.shape[0]
+        N = wind_directions.shape[1]
+        
+        # Convert wind direction to vectors
+        wind_rad = torch.deg2rad(wind_directions)
+        wind_vectors = torch.stack([torch.cos(wind_rad), torch.sin(wind_rad)], dim=-1)
         # (B, N, 2)
-
-        B = wind_vectors.shape[0]
-        N = wind_vectors.shape[1]
-
-        # positions: (B, N, 2)
-        pos = positions
-
-        # pairwise offsets: (B, N, N, 2)
-        offsets = pos[:, :, None, :] - pos[:, None, :, :]
+        
+        # Pairwise spatial offsets
+        offsets = positions[:, :, None, :] - positions[:, None, :, :]  # (B, N, N, 2)
         dists = torch.norm(offsets, dim=-1)  # (B, N, N)
-
+        
         eps = 1e-6
-        spatial_dir = offsets / (dists[..., None] + eps)
-
-        # wind_vectors: (B, N, 1, 2) -> align with spatial_dir
-        wind_exp = wind_vectors[:, :, None, :]
+        spatial_dir = offsets / (dists[..., None] + eps)  # (B, N, N, 2)
+        
+        # Alignment: how well wind aligns with spatial direction
+        wind_exp = wind_vectors[:, :, None, :]  # (B, N, 1, 2)
         alignment = (wind_exp * spatial_dir).sum(dim=-1)  # (B, N, N)
-        # directional input: (B, N, N, 3) -> [wind_x, wind_y, alignment]
-        # wind_exp: (B, N, 1, 2) -> wind_x/wind_y: (B, N)
-        wind_x = wind_exp[..., 0].squeeze(-1)
-        wind_y = wind_exp[..., 1].squeeze(-1)
-
-        # expand to pairwise shape (B, N, N)
-        wind_x_mat = wind_x.unsqueeze(2).expand(-1, -1, N)
-        wind_y_mat = wind_y.unsqueeze(2).expand(-1, -1, N)
-
-        dir_input = torch.stack([wind_x_mat, wind_y_mat, alignment], dim=-1)
-        # Flatten to feed through directional_influence
-        flat_input = dir_input.view(-1, 3)
-        mod_flat = self.directional_influence(flat_input)
+        
+        # ========== FIX: Use alignment directly with proper reshape ==========
+        # alignment is already [-1, +1] where:
+        # +1 = perfect downwind
+        # -1 = perfect upwind
+        #  0 = perpendicular
+        
+        # Flatten for computation
+        alignment_flat = alignment.view(-1)  # (B*N*N,)
+        
+        # Apply modulation formula
+        mod_flat = 0.6 + 0.4 * alignment_flat  # (B*N*N,)
+        
+        # Reshape back to (B, N, N)
         mod = mod_flat.view(B, N, N)
-
-        # For self-connection, set modulation to 1 (or a fixed value)
+        
+        # Self-connections always have modulation = 1
         eye = torch.eye(N, device=device).unsqueeze(0)
-        mod = mod * (1.0 - eye) + 0.5 * eye
-
-        # If adjacency was non-batched, reduce back
-        if adjacency.dim() == 2:
+        mod = mod * (1.0 - eye) + eye
+        
+        # Apply modulation
+        if not is_batched:
             mod = mod[0]
-
-        modulated_adjacency = adjacency * mod
-
-        return modulated_adjacency
+        
+        return adjacency * mod
     
     def _sparsify_adjacency(self, adjacency):
-        """Sparsify adjacency matrix by keeping only top connections."""
-        # Support adjacency: (N,N) or (B,N,N)
+        """Sparsify using top-p (nucleus sampling)."""
         temp = self.temperature_scale.clamp(min=0.01)
         probs = torch.softmax(adjacency / temp, dim=-1)
-
-        mode = getattr(self, 'sparsify_mode', 'quantile')
-
-        def renorm(x):
-            s = x.sum(dim=-1, keepdim=True)
-            s = torch.clamp(s, min=1e-8)
-            return x / s
-
-        if mode == 'quantile':
-            if probs.dim() == 2:
-                threshold = torch.quantile(probs, 1 - self.sparsity_threshold, dim=-1, keepdim=True)
-                mask = (probs >= threshold).float()
-                return renorm(probs * mask)
-            else:
-                threshold = torch.quantile(probs, 1 - self.sparsity_threshold, dim=-1, keepdim=True)
-                mask = (probs >= threshold).float()
-                return renorm(probs * mask)
-
-        elif mode == 'magnitude':
-            thr = float(getattr(self, 'prob_threshold', 0.0))
-            if probs.dim() == 2:
-                mask = (probs >= thr).float()
-                # ensure at least one per row
-                ensure = torch.zeros_like(mask)
-                argmax = probs.argmax(dim=-1)
-                ensure[torch.arange(probs.shape[0]), argmax] = 1.0
-                mask = torch.maximum(mask, ensure)
-                return renorm(probs * mask)
-            else:
-                B, N, _ = probs.shape
-                mask = (probs >= thr).float()
-                ensure = torch.zeros_like(mask)
-                argmax = probs.argmax(dim=-1)
-                br = torch.arange(B).unsqueeze(1).expand(B, N)
-                nr = torch.arange(N).unsqueeze(0).expand(B, N)
-                ensure[br, nr, argmax] = 1.0
-                mask = torch.maximum(mask, ensure)
-                return renorm(probs * mask)
-
-        elif mode == 'top_p':
-            p = float(getattr(self, 'nucleus_p', 0.9))
-            if probs.dim() == 2:
-                # (N, N)
-                sorted_probs, sorted_idx = torch.sort(probs, dim=-1, descending=True)
-                cumsum = torch.cumsum(sorted_probs, dim=-1)
-                shifted = cumsum - sorted_probs
-                keep_sorted = (shifted < p)
-                # always keep the top-1
-                keep_sorted[:, 0] = True
-                # scatter back to original order
-                mask = torch.zeros_like(probs, dtype=torch.float32)
-                mask.scatter_(1, sorted_idx, keep_sorted.float())
-                return renorm(probs * mask)
-            else:
-                # (B, N, N)
-                sorted_probs, sorted_idx = torch.sort(probs, dim=-1, descending=True)
-                cumsum = torch.cumsum(sorted_probs, dim=-1)
-                shifted = cumsum - sorted_probs
-                keep_sorted = (shifted < p)
-                keep_sorted[..., 0] = True
-                mask = torch.zeros_like(probs, dtype=torch.float32)
-                mask.scatter_(-1, sorted_idx, keep_sorted.float())
-                return renorm(probs * mask)
-
+        
+        is_batched = probs.dim() == 3
+        p = float(self.nucleus_p)
+        
+        if is_batched:
+            # (B, N, N)
+            sorted_probs, sorted_idx = torch.sort(probs, dim=-1, descending=True)
+            cumsum = torch.cumsum(sorted_probs, dim=-1)
+            shifted = cumsum - sorted_probs
+            keep_sorted = (shifted < p)
+            keep_sorted[..., 0] = True  # Always keep top-1
+            
+            mask = torch.zeros_like(probs)
+            mask.scatter_(-1, sorted_idx, keep_sorted.float())
         else:
-            # Fallback to quantile if unknown mode
-            if probs.dim() == 2:
-                threshold = torch.quantile(probs, 1 - self.sparsity_threshold, dim=-1, keepdim=True)
-                mask = (probs >= threshold).float()
-                return renorm(probs * mask)
-            else:
-                threshold = torch.quantile(probs, 1 - self.sparsity_threshold, dim=-1, keepdim=True)
-                mask = (probs >= threshold).float()
-                return renorm(probs * mask)
+            # (N, N)
+            sorted_probs, sorted_idx = torch.sort(probs, dim=-1, descending=True)
+            cumsum = torch.cumsum(sorted_probs, dim=-1)
+            shifted = cumsum - sorted_probs
+            keep_sorted = (shifted < p)
+            keep_sorted[:, 0] = True
+            
+            mask = torch.zeros_like(probs)
+            mask.scatter_(1, sorted_idx, keep_sorted.float())
+        
+        # Renormalize
+        sparsified = probs * mask
+        row_sums = sparsified.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+        return sparsified / row_sums
     
     def _add_self_loops(self, adjacency, self_loop_weight=0.1):
-        """Add self-loops to adjacency matrix."""
+        """Add self-loops."""
         if adjacency.dim() == 2:
-            n_stations = adjacency.shape[0]
+            N = adjacency.shape[0]
             device = adjacency.device
-            identity = torch.eye(n_stations, device=device)
-            adjacency_with_loops = adjacency + self_loop_weight * identity
-            return adjacency_with_loops
+            identity = torch.eye(N, device=device)
+            return adjacency + self_loop_weight * identity
         else:
-            # (B, N, N)
             B, N, _ = adjacency.shape
             device = adjacency.device
             identity = torch.eye(N, device=device).unsqueeze(0)
-            adjacency_with_loops = adjacency + self_loop_weight * identity
-            return adjacency_with_loops
+            return adjacency + self_loop_weight * identity
     
     def _normalize_adjacency(self, adjacency):
-        """Normalize adjacency matrix (row-wise stochastic)."""
-        row_sums = adjacency.sum(dim=-1, keepdim=True)
-        row_sums = torch.clamp(row_sums, min=1e-8)
-        normalized = adjacency / row_sums
-        return normalized
-    
-    def forward(self, station_representations, 
-                positions=None, wind_directions=None):
-        """
-        Learn adaptive adjacency matrix.
-        
-        Args:
-            station_representations: (n_stations, hidden_dim) combined repr.
-                                     Should be based on spatial/static features.
-            positions: (n_stations, 2) lat/lon
-            wind_directions: (n_stations,) degrees
-        
-        Returns:
-            adjacency: (n_stations, n_stations) sparse, normalized
-        """
-        
-        # Support batched or non-batched station_representations
-        # station_representations: (N, E) or (B, N, E)
-        device = station_representations.device
-        
-        # If station_representations are provided per-sample, they may be batched too.
-        adjacency = self._compute_base_adjacency(station_representations)
-
-        # Prepare default wind_directions / positions if not provided
-        if wind_directions is None:
-            if adjacency.dim() == 2:
-                N = adjacency.shape[0]
-                wind_directions = torch.ones(N, device=device) * 270.0
-            else:
-                N = adjacency.shape[1]
-                B = adjacency.shape[0]
-                wind_directions = torch.ones(B, N, device=device) * 270.0
-
-        if positions is None:
-            if adjacency.dim() == 2:
-                grid_size = int(math.sqrt(adjacency.shape[0])) + 1
-                x_pos = torch.arange(adjacency.shape[0], device=device) % grid_size
-                y_pos = torch.arange(adjacency.shape[0], device=device) // grid_size
-                positions = torch.stack([x_pos, y_pos], dim=1).float()
-                positions = positions / positions.max()
-            else:
-                B, N, _ = adjacency.shape
-                grid_size = int(math.sqrt(N)) + 1
-                x_pos = torch.arange(N, device=device) % grid_size
-                y_pos = torch.arange(N, device=device) // grid_size
-                pos = torch.stack([x_pos, y_pos], dim=1).float()
-                pos = pos / pos.max()
-                positions = pos.unsqueeze(0).expand(B, -1, -1)
-
-        # Apply directional modulation (vectorized)
-        adjacency = self._apply_directional_modulation(adjacency, wind_directions, positions)
-        '''
-        with torch.no_grad():
-            print("[ADJ_DEBUG] after modulation mean/std:", float(adjacency.mean()), float(adjacency.std()))
-            print("Edge count before sparsify:", int((adjacency > 0).sum().item()))
-        '''
-        # Sparsify
-        adjacency = self._sparsify_adjacency(adjacency)
-        '''
-        with torch.no_grad():
-            kept = (adjacency > 0).sum(dim=-1)
-            kept_mean = float(kept.float().mean())
-            kept_min = int(kept.min())
-            kept_max = int(kept.max())
-            print(f"[ADJ_DEBUG] after sparsify nnz per-row mean/min/max: {kept_mean:.2f}/{kept_min}/{kept_max}")
-        '''
-
-        # Add self-loops
-        adjacency = self._add_self_loops(adjacency, self_loop_weight=0.1)
-
-        # Normalize
-        adjacency = self._normalize_adjacency(adjacency)
-        '''
-        with torch.no_grad():
-            row_sums = adjacency.sum(dim=-1)
-            print("[ADJ_DEBUG] final row-sum mean/std:", float(row_sums.mean()), float(row_sums.std()))
-        '''
-        return adjacency
+        """Row-wise normalization."""
+        row_sums = adjacency.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+        return adjacency / row_sums
