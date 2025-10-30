@@ -70,13 +70,18 @@ trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"Total parameters: {total_params:,}")
 print(f"Trainable parameters: {trainable_params:,}")
 
-def criterion_multi_horizon(output, target, horizon_weights):
-    """Compute weighted MAE loss across multiple horizons.
+def criterion_multi_horizon(output, target, horizon_weights, model=None, l2_lambda=1e-4):
+    """Compute weighted MAE loss across multiple horizons with L2 regularization.
     
     Using MAE instead of MSE because:
     - MAE treats all errors equally (no squaring)
     - More robust to outliers
     - Direct optimization of the metric we care about
+    
+    L2 regularization (weight decay):
+    - Prevents overfitting by penalizing large weights
+    - Encourages smoother, more generalizable solutions
+    - lambda=1e-4 is a small penalty (won't dominate the loss)
     """
     mae_per_sample = torch.abs(output - target)
     
@@ -86,6 +91,14 @@ def criterion_multi_horizon(output, target, horizon_weights):
         mae_per_horizon = mae_per_sample.mean(dim=0)
     
     weighted_loss = (mae_per_horizon * horizon_weights).sum()
+    
+    # Add L2 regularization on model parameters
+    if model is not None and l2_lambda > 0:
+        l2_reg = torch.tensor(0., device=output.device)
+        for param in model.parameters():
+            if param.requires_grad:
+                l2_reg += torch.norm(param, p=2) ** 2
+        weighted_loss = weighted_loss + l2_lambda * l2_reg
     
     return weighted_loss, mae_per_horizon
 
@@ -179,7 +192,11 @@ def train_epoch(model, epoch):
         output_original = output * scaler_scale.unsqueeze(0).unsqueeze(-1) + scaler_mean.unsqueeze(0).unsqueeze(-1)
         target_original = target * scaler_scale.unsqueeze(0).unsqueeze(-1) + scaler_mean.unsqueeze(0).unsqueeze(-1)
         
-        weighted_loss, mae_per_horizon = criterion_multi_horizon(output_original, target_original, horizon_weights)
+        # MAE loss with L2 regularization (lambda=1e-4)
+        weighted_loss, mae_per_horizon = criterion_multi_horizon(
+            output_original, target_original, horizon_weights, 
+            model=model, l2_lambda=1e-4
+        )
         weighted_loss.backward()
         
         # Gradient clipping
@@ -384,19 +401,25 @@ loss_df = loss_df.merge(val_df, on='epoch', how='left')
 loss_df.to_csv('results/loss_history_v3.1.csv', index=False)
 print(f"✓ Saved loss history to results/loss_history_v3.1.csv")
 
-# Plot loss curves
-plt.figure(figsize=(10, 6))
-plt.plot(range(1, len(train_loss_history) + 1), train_loss_history, 'b-o', label='Train MAE', linewidth=2, markersize=3)
-if val_loss_history:
-    plt.plot(val_epochs, val_loss_history, 'r-s', label='Validation MAE', linewidth=2, markersize=3)
+# Plot MAE curves (training and validation)
+plt.figure(figsize=(12, 6))
+plt.plot(range(1, len(train_loss_history) + 1), train_loss_history, 'b-o', label='Train MAE', linewidth=2, markersize=4, alpha=0.8)
+if val_mae_history:
+    plt.plot(val_epochs, val_mae_history, 'r-s', label='Validation MAE', linewidth=2, markersize=4, alpha=0.8)
+    
+    # Mark the best validation MAE point
+    best_epoch = val_epochs[val_mae_history.index(min(val_mae_history))]
+    plt.axhline(y=best_val_mae, color='green', linestyle='--', linewidth=1.5, alpha=0.5, label=f'Best Val MAE: {best_val_mae:.4f}')
+    plt.scatter([best_epoch], [best_val_mae], color='green', s=100, zorder=5, marker='*', edgecolors='darkgreen', linewidths=1.5)
+
 plt.xlabel('Epoch', fontsize=12)
 plt.ylabel('MAE (m/s)', fontsize=12)
 plt.title('V3.1 Model - Training and Validation MAE History', fontsize=14, fontweight='bold')
-plt.legend(fontsize=11)
-plt.grid(True, alpha=0.3)
+plt.legend(fontsize=11, loc='upper right')
+plt.grid(True, alpha=0.3, linestyle=':')
 plt.tight_layout()
-plt.savefig('results/loss_history_v3.1.png', dpi=300, bbox_inches='tight')
-print(f"✓ Saved MAE plot to results/loss_history_v3.1.png")
+plt.savefig('results/mae_history_v3.1.png', dpi=300, bbox_inches='tight')
+print(f"✓ Saved MAE plot to results/mae_history_v3.1.png")
 plt.close()
 
 print(f"\n=== V3.1 Training Complete ===")
