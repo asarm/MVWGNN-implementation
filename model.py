@@ -47,7 +47,7 @@ class DDGNNWind(nn.Module):
         self.adjacency_learner = DynamicAdjacencyLearner(
             hidden_dim=hidden_dim,
             n_stations=n_stations,
-            embedding_dim=32,
+            embedding_dim=64,
             sparsify_mode='top_p',
             nucleus_p=0.9,
             temperature_scale=0.2
@@ -55,7 +55,7 @@ class DDGNNWind(nn.Module):
         
         # ========== GNN LAYERS ==========
         self.gnn_layers = nn.ModuleList([
-            DirectionalGAT(hidden_dim, hidden_dim, n_heads=n_heads, dropout=0.4)
+            DirectionalGAT(hidden_dim, hidden_dim, n_heads=n_heads, dropout=0.25)
             for _ in range(n_gnn_layers)
         ])
         

@@ -118,6 +118,9 @@ class TemporalEncoder(nn.Module):
         
         # ========== Final projection ==========
         temporal_features = self.output_proj(temporal_features)
+        
+        # Normalize output to prevent scale mismatch
+        temporal_features = temporal_features / (temporal_features.std(dim=-1, keepdim=True).clamp(min=0.1))
 
         if is_batched:
             temporal_features = temporal_features.view(B, N, self.hidden_dim)

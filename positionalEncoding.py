@@ -62,6 +62,9 @@ class SpatialPositionalEncoding(nn.Module):
             # station_embeddings: (N, hidden_dim) -> (1, N, hidden_dim)
             emb = self.station_embeddings.unsqueeze(0)
             spatial_embed = spatial_proj + emb
+            
+            # Normalize to prevent scale mismatch
+            spatial_embed = spatial_embed / (spatial_embed.std(dim=-1, keepdim=True).clamp(min=0.1))
             return spatial_embed
         else:
             n_stations = lat.shape[0]
@@ -80,5 +83,8 @@ class SpatialPositionalEncoding(nn.Module):
 
             # Add station-specific embeddings (learnable offsets)
             spatial_embed = spatial_proj + self.station_embeddings
+            
+            # Normalize to prevent scale mismatch
+            spatial_embed = spatial_embed / (spatial_embed.std(dim=-1, keepdim=True).clamp(min=0.1))
 
             return spatial_embed

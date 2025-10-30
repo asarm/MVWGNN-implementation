@@ -22,10 +22,10 @@ first_city_name = cities['City'].iloc[1]
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 n_stations = len(cities)
-seq_len = 24
-hidden_dim = 48  # 32 → 48 (more capacity for attention)
+seq_len = 48
+hidden_dim = 128 
 train_size = int(0.8 * len(df))
-epochNum = 10
+epochNum = 100
 
 prediction_horizons = [1]
 num_horizons = len(prediction_horizons)
@@ -71,19 +71,26 @@ print(f"Total parameters: {total_params:,}")
 print(f"Trainable parameters: {trainable_params:,}")
 
 def criterion_multi_horizon(output, target, horizon_weights):
-    """Compute weighted MSE loss across multiple horizons."""
-    mse_per_sample = (output - target) ** 2
+    """Compute weighted MAE loss across multiple horizons.
     
-    if mse_per_sample.dim() == 3:
-        mse_per_horizon = mse_per_sample.mean(dim=(0, 1))
+    Using MAE instead of MSE because:
+    - MAE treats all errors equally (no squaring)
+    - More robust to outliers
+    - Direct optimization of the metric we care about
+    """
+    mae_per_sample = torch.abs(output - target)
+    
+    if mae_per_sample.dim() == 3:
+        mae_per_horizon = mae_per_sample.mean(dim=(0, 1))
     else:
-        mse_per_horizon = mse_per_sample.mean(dim=0)
+        mae_per_horizon = mae_per_sample.mean(dim=0)
     
-    weighted_loss = (mse_per_horizon * horizon_weights).sum()
+    weighted_loss = (mae_per_horizon * horizon_weights).sum()
     
-    return weighted_loss, mse_per_horizon
+    return weighted_loss, mae_per_horizon
 
-criterion = torch.nn.MSELoss(reduction='none')
+# Use L1Loss (MAE) instead of MSELoss for evaluation
+criterion = torch.nn.L1Loss(reduction='none')
 
 # V3.1 CRITICAL FIX: Much longer warmup + slower decay
 optimizer = torch.optim.AdamW(model.parameters(), 
@@ -114,6 +121,7 @@ val_loss_history = []
 val_mae_history = []
 val_horizon_mae_history = {f'horizon_{h}h_mae': [] for h in prediction_horizons}
 best_val_loss = float('inf')
+best_val_mae = float('inf')  # Track best MAE separately
 
 def train_epoch(model, epoch):
     model.train()
@@ -166,7 +174,12 @@ def train_epoch(model, epoch):
             positions,
         )
 
-        weighted_loss, mse_per_horizon = criterion_multi_horizon(output, target, horizon_weights)
+        # CRITICAL FIX: Rescale predictions and targets to original scale before computing loss
+        # This ensures the model learns to minimize errors in real-world units (m/s), not z-scores
+        output_original = output * scaler_scale.unsqueeze(0).unsqueeze(-1) + scaler_mean.unsqueeze(0).unsqueeze(-1)
+        target_original = target * scaler_scale.unsqueeze(0).unsqueeze(-1) + scaler_mean.unsqueeze(0).unsqueeze(-1)
+        
+        weighted_loss, mae_per_horizon = criterion_multi_horizon(output_original, target_original, horizon_weights)
         weighted_loss.backward()
         
         # Gradient clipping
@@ -179,18 +192,17 @@ def train_epoch(model, epoch):
         total_loss += loss_val * b
         
         for i, h in enumerate(prediction_horizons):
-            horizon_losses_sum[f'horizon_{h}h'] += mse_per_horizon[i].item() * b
+            horizon_losses_sum[f'horizon_{h}h'] += mae_per_horizon[i].item() * b
 
     avg_loss = total_loss / (len(train_loader.dataset))
     current_lr = optimizer.param_groups[0]['lr']
-    print(f"Epoch {epoch}, Training Loss: {avg_loss:.6f}, LR: {current_lr:.6f}")
+    print(f"Epoch {epoch}, Training MAE: {avg_loss:.6f}, LR: {current_lr:.6f}")
     
     for h_name, h_loss_sum in horizon_losses_sum.items():
         avg_h_loss = h_loss_sum / len(train_loader.dataset)
-        print(f"  {h_name}: {avg_h_loss:.6f}")
+        print(f"  {h_name} MAE: {avg_h_loss:.6f}")
     
     return avg_loss
-
 
 def eval_model(model, data_loader):
     model.eval()
@@ -276,7 +288,7 @@ def eval_model(model, data_loader):
         first_city_predictions[h] = np.concatenate(first_city_predictions[h])
         first_city_targets[h] = np.concatenate(first_city_targets[h])
     
-    print(f"Validation - Loss: {avg_loss:.6f}, MAE: {avg_mae:.6f}")
+    print(f"Validation - MAE (loss): {avg_loss:.6f}, MAE (metric): {avg_mae:.6f}")
     
     avg_horizon_maes = {}
     for h_name, h_mae in horizon_maes.items():
@@ -288,7 +300,7 @@ def eval_model(model, data_loader):
 
 
 # Training loop
-for epoch in range(1, epochNum):  # 25 → 40
+for epoch in range(1, epochNum):
     train_loss = train_epoch(model, epoch)
     train_loss_history.append(train_loss)
 
@@ -328,9 +340,10 @@ for epoch in range(1, epochNum):  # 25 → 40
             plt.close()
             print(f"✓ Saved prediction plot to {pred_plot_path}")
         
-        # Save best model
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        # Save best model based on MAE (not loss!)
+        if val_mae < best_val_mae:
+            best_val_mae = val_mae
+            best_val_loss = val_loss  # Update for reference
             checkpoint_path = os.path.join("checkpoints", "best_model_v3.1.pth")
             torch.save({
                 'epoch': epoch,
@@ -340,14 +353,15 @@ for epoch in range(1, epochNum):  # 25 → 40
                 'train_loss': train_loss,
                 'val_loss': val_loss,
                 'val_mae': val_mae,
+                'best_val_mae': best_val_mae,
                 'best_val_loss': best_val_loss,
             }, checkpoint_path)
-            print(f"✓ Saved best model with validation loss: {best_val_loss:.6f}")
+            print(f"✓ Saved best model with validation MAE: {best_val_mae:.6f} (loss: {val_loss:.6f})")
             stop_counter = 0
         else:
             stop_counter += 1
             if stop_counter >= patience:
-                print(f"Early stopping triggered after {patience} epochs without improvement.")
+                print(f"Early stopping triggered after {patience} epochs without MAE improvement.")
                 break
 
 # Save loss history
@@ -372,19 +386,20 @@ print(f"✓ Saved loss history to results/loss_history_v3.1.csv")
 
 # Plot loss curves
 plt.figure(figsize=(10, 6))
-plt.plot(range(1, len(train_loss_history) + 1), train_loss_history, 'b-o', label='Train Loss', linewidth=2, markersize=3)
+plt.plot(range(1, len(train_loss_history) + 1), train_loss_history, 'b-o', label='Train MAE', linewidth=2, markersize=3)
 if val_loss_history:
-    plt.plot(val_epochs, val_loss_history, 'r-s', label='Validation Loss', linewidth=2, markersize=3)
+    plt.plot(val_epochs, val_loss_history, 'r-s', label='Validation MAE', linewidth=2, markersize=3)
 plt.xlabel('Epoch', fontsize=12)
-plt.ylabel('Loss (MSE)', fontsize=12)
-plt.title('V3.1 Model - Training and Validation Loss History', fontsize=14, fontweight='bold')
+plt.ylabel('MAE (m/s)', fontsize=12)
+plt.title('V3.1 Model - Training and Validation MAE History', fontsize=14, fontweight='bold')
 plt.legend(fontsize=11)
 plt.grid(True, alpha=0.3)
 plt.tight_layout()
 plt.savefig('results/loss_history_v3.1.png', dpi=300, bbox_inches='tight')
-print(f"✓ Saved loss plot to results/loss_history_v3.1.png")
+print(f"✓ Saved MAE plot to results/loss_history_v3.1.png")
 plt.close()
 
 print(f"\n=== V3.1 Training Complete ===")
+print(f"Best validation MAE: {best_val_mae:.6f}")
 print(f"Best validation loss: {best_val_loss:.6f}")
 print(f"Best model saved to: checkpoints/best_model_v3.1.pth")

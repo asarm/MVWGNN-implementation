@@ -122,8 +122,11 @@ class DynamicAdjacencyLearner(nn.Module):
         
         # ========== STEP 3: Combine spatial and temporal ==========
         # Learnable combination (start with 70% spatial, 30% temporal)
-        spatial_adj_norm = spatial_adj / (spatial_adj.std() + 1e-8)
-        temporal_adj_norm = temporal_adj / (temporal_adj.std() + 1e-8)
+        # Use safer normalization: clamp to prevent magnitude explosion
+        spatial_std = spatial_adj.std().clamp(min=0.1)  # Prevent division by very small numbers
+        temporal_std = temporal_adj.std().clamp(min=0.1)
+        spatial_adj_norm = spatial_adj / spatial_std
+        temporal_adj_norm = temporal_adj / temporal_std
         combined_adj = 0.7 * spatial_adj_norm + 0.3 * temporal_adj_norm
         
         # Add station biases

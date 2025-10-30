@@ -75,4 +75,7 @@ class CyclicTemporalEncoding(nn.Module):
         temporal_embed = self.cyclic_projection(all_cyclic)
         # Shape: (batch_size, hidden_dim)
         
+        # Normalize output to prevent scale mismatch with other embeddings
+        temporal_embed = temporal_embed / (temporal_embed.std(dim=-1, keepdim=True).clamp(min=0.1))
+        
         return temporal_embed

@@ -173,8 +173,8 @@ class GraphWeatherDataset(Dataset):
                 target_h = self.final_feats[-1, :, 0].astype(np.float32)
             targets.append(target_h)
 
-        # Stack targets: (1, n_stations) -> transpose to (n_stations, 1)
-        target_scaled = np.stack(targets, axis=0).T.astype(np.float32)  # (n_stations, 1)
+        # Stack targets: (n_horizons, n_stations) -> transpose to (n_stations, n_horizons)
+        target_scaled = np.stack(targets, axis=0).T.astype(np.float32)  # (n_stations, n_horizons)
         
         # spatial tensors
         lat_t = torch.from_numpy(self.norm_lats).float()
