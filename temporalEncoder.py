@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,10 +13,12 @@ class TemporalEncoder(nn.Module):
     - Low frequency: synoptic patterns (pressure systems)
     """
     
-    def __init__(self, input_dim=7, hidden_dim=64, seq_len=168):
+    def __init__(self, input_dim=7, hidden_dim=64, seq_len=168, debug: bool = False):
         super().__init__()
         self.seq_len = seq_len
         self.hidden_dim = hidden_dim
+        # Debug only active when both the flag is True and TEMPORAL_DEBUG=1
+        self.debug = bool(debug) and (os.getenv("TEMPORAL_DEBUG", "0") == "1")
         
         # ========== Multi-scale Temporal Convolutions ==========
         # Dilated convolutions capture patterns at different timescales
@@ -27,31 +30,15 @@ class TemporalEncoder(nn.Module):
             nn.Conv1d(input_dim, hidden_dim, kernel_size=3, dilation=8, padding=8),
         ])
         
-        # ========== LSTM for Long-Range Dependencies ==========
-        # RNNs excel at capturing complex temporal dynamics
-        # But we use bidirectional to see full context
-        
-        self.lstm = nn.LSTM(
-            input_size=hidden_dim * 4,  # concatenate all dilated conv outputs
-            hidden_size=hidden_dim,
-            num_layers=2,
-            bidirectional=True,
-            dropout=0.2,
-            batch_first=True
-        )
+        # ========== LSTM removed ==========
+        # We now rely purely on multi-scale temporal convolutions
         
         # ========== Attention over Time ==========
-        # Learn which timesteps matter most
-        
-        self.temporal_attention = nn.MultiheadAttention(
-            embed_dim=hidden_dim * 2,  # from bi-LSTM
-            num_heads=4,
-            batch_first=True
-        )
+        # Removed attention mechanism to simplify encoder and reduce compute
         
         # ========== Output projection ==========
         self.output_proj = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Linear(hidden_dim * 4, hidden_dim),  # project pooled conv features
             nn.LayerNorm(hidden_dim),
             nn.ReLU()
         )
@@ -59,70 +46,52 @@ class TemporalEncoder(nn.Module):
     def forward(self, historical_data):
         """
         Args:
-            historical_data: (n_stations, seq_len, input_dim)
-        
+            historical_data: (n_stations, seq_len, input_dim) or
+                             (batch, n_stations, seq_len, input_dim)
+
         Returns:
-            temporal_features: (n_stations, hidden_dim)
+            temporal_features: (n_stations, hidden_dim) or
+                (batch, n_stations, hidden_dim) when batched
                 Aggregated representation of the full history
         """
-        
-        # Reshape for Conv1d: (n_stations, input_dim, seq_len)
-        x = historical_data.transpose(1, 2)
+        is_batched = historical_data.dim() == 4
+
+        if is_batched:
+            B, N, S, D = historical_data.shape
+            # merge batch and station dims for temporal processing
+            x = historical_data.reshape(B * N, S, D).transpose(1, 2)
+        else:
+            # Reshape for Conv1d: (n_stations, input_dim, seq_len)
+            x = historical_data.transpose(1, 2)
         
         # ========== Multi-scale convolution ==========
         multi_scale_features = []
         for conv in self.dilated_convs:
             features = F.relu(conv(x))
-            # Shape: (n_stations, hidden_dim, seq_len)
+            # Shape: (batch*n_stations, hidden_dim, seq_len) or (n_stations, hidden_dim, seq_len)
             multi_scale_features.append(features)
         
         # Concatenate all scales
         x_conv = torch.cat(multi_scale_features, dim=1)
         # Shape: (n_stations, hidden_dim*4, seq_len)
-        
-        # Reshape back: (n_stations, seq_len, hidden_dim*4)
-        x_conv = x_conv.transpose(1, 2)
-        
-        
-        # ========== LSTM for temporal aggregation ==========
-        lstm_output, (h_n, c_n) = self.lstm(x_conv)
-        # lstm_output: (n_stations, seq_len, hidden_dim*2)
-        # h_n: (2*num_layers, n_stations, hidden_dim) - final hidden state
-        
-        
-        # ========== Attention: which timesteps matter? ==========
-        attended, _ = self.temporal_attention(
-            lstm_output, lstm_output, lstm_output
-        )
-        # Shape: (n_stations, seq_len, hidden_dim*2)
-        
-        
-        # ========== Aggregate over time ==========
-        # Use the last hidden state + attention-weighted average
-        
-        last_state = h_n[-1]  # Take last layer's hidden state
-        # Shape: (n_stations, hidden_dim)
-        
-        # Attention-weighted aggregation
-        attention_weights = torch.softmax(
-            torch.sum(attended, dim=-1, keepdim=True), dim=1
-        )
-        # Shape: (n_stations, seq_len, 1)
-        
-        attended_aggregated = torch.sum(
-            attended * attention_weights, dim=1
-        )
-        # Shape: (n_stations, hidden_dim*2)
-        
-        # Combine final state + attended aggregation
-        temporal_repr = torch.cat([last_state, attended_aggregated], dim=-1)
-        # Shape: (n_stations, hidden_dim*3)
-        
+
+        # ========== Aggregate over time (no LSTM/attention) ==========
+        # CRITICAL: Use MEAN pooling to prevent last-timestep bias
+        # Pool directly over time dimension of concatenated multi-scale convs
+        temporal_features = torch.mean(x_conv, dim=2)
+        if self.debug:
+            print(f"[ENCODER] Final output - mean: {temporal_features.mean():.4f}, "
+                  f"std: {temporal_features.std():.4f}, min: {temporal_features.min():.4f}, "
+                  f"max: {temporal_features.max():.4f}")
+        # Shape: (batch*n_stations, hidden_dim)
         
         # ========== Final projection ==========
-        temporal_features = self.output_proj(temporal_repr[:, :2*self.hidden_dim])
-        # Shape: (n_stations, hidden_dim)
-        
+        temporal_features = self.output_proj(temporal_features)
+        # Shape: (batch*n_stations, hidden_dim) or (n_stations, hidden_dim)
+
+        if is_batched:
+            temporal_features = temporal_features.view(B, N, self.hidden_dim)
+
         return temporal_features
     
 

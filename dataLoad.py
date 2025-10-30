@@ -1,29 +1,57 @@
 import pandas as pd
 import numpy as np
 from scipy.stats import pearsonr, spearmanr, circmean, circstd
+from sklearn.impute import KNNImputer
 
 def load_data(dataName="hourly-data"):
     if dataName == "hourly-data":
+        startDate = '2012-10-02'
+        endDate = '2017-10-28'
         # load necessary data separately
-        cities = pd.read_csv("hourly-data/city_attributes.csv")
+        cities = pd.read_csv("data/city_attributes.csv")
         cities = cities[cities.Country != 'Israel']
         city_names = cities['City'].tolist()
         
         # columns are datetime + city names
-        humity = pd.read_csv("hourly-data/humidity.csv")
-        pressure = pd.read_csv("hourly-data/pressure.csv")
-        temperature = pd.read_csv("hourly-data/temperature.csv")
-        wind_direction = pd.read_csv("hourly-data/wind_direction.csv")
-        wind_speed = pd.read_csv("hourly-data/wind_speed.csv")
+        humidity = pd.read_csv("data/humidity.csv")
+        humidity['datetime'] = pd.to_datetime(humidity['datetime'])
+        humidity = humidity[humidity['datetime'] >= startDate]
+        humidity = humidity[humidity['datetime'] <= endDate]
+
+        pressure = pd.read_csv("data/pressure.csv")
+        pressure['datetime'] = pd.to_datetime(pressure['datetime'])
+        pressure = pressure[pressure['datetime'] >= startDate]
+        pressure = pressure[pressure['datetime'] <= endDate]
+
+        temperature = pd.read_csv("data/temperature.csv")
+        temperature['datetime'] = pd.to_datetime(temperature['datetime'])
+        temperature = temperature[temperature['datetime'] >= startDate]
+        temperature = temperature[temperature['datetime'] <= endDate]
+
+        wind_direction = pd.read_csv("data/wind_direction.csv")
+        wind_direction['datetime'] = pd.to_datetime(wind_direction['datetime'])
+        wind_direction = wind_direction[wind_direction['datetime'] >= startDate]
+        wind_direction = wind_direction[wind_direction['datetime'] <= endDate]
+
+        wind_speed = pd.read_csv("data/wind_speed.csv")
+        wind_speed['datetime'] = pd.to_datetime(wind_speed['datetime'])
+        wind_speed = wind_speed[wind_speed['datetime'] >= startDate]
+        wind_speed = wind_speed[wind_speed['datetime'] <= endDate]
 
         features = {
-            'humidity': humity.ffill().bfill(),
-            'pressure': pressure.ffill().bfill(),
-            'temperature': temperature.ffill().bfill(),
-            'wind_direction': wind_direction.ffill().bfill(),
-            'wind_speed': wind_speed.ffill().bfill()
+            'humidity': humidity,
+            'pressure': pressure,
+            'temperature': temperature,
+            'wind_direction': wind_direction,
+            'wind_speed': wind_speed
         }
-        # city_names = [col for col in humity.columns if col != 'datetime']
+
+        # Impute missing values
+        for feature_name, df in features.items():
+            data_array = df[city_names].values  # shape (T, n_stations)
+            imputer = KNNImputer(n_neighbors=5)
+            imputed_array = imputer.fit_transform(data_array)
+            features[feature_name][city_names] = imputed_array
 
         # Prepare a dictionary for MultiIndex columns
         data = {}
@@ -34,7 +62,7 @@ def load_data(dataName="hourly-data"):
         df = pd.DataFrame(data)
         df.columns = pd.MultiIndex.from_tuples(df.columns)
 
-        df.index = humity['datetime']
+        df.index = humidity['datetime']
         df.index.name = 'datetime'
-    
+
     return df, cities

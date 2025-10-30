@@ -33,31 +33,52 @@ class SpatialPositionalEncoding(nn.Module):
     def forward(self, lat, lon, wind_direction_deg):
         """
         Args:
-            lat: (n_stations,) latitude normalized to [0, 1]
-            lon: (n_stations,) longitude normalized to [0, 1]
-            wind_direction_deg: (n_stations,) wind direction in degrees [0, 360)
-        
+            lat: (n_stations,) or (batch, n_stations) latitude normalized to [0, 1]
+            lon: (n_stations,) or (batch, n_stations) longitude normalized to [0, 1]
+            wind_direction_deg: (n_stations,) or (batch, n_stations) wind direction in degrees [0, 360)
+
         Returns:
-            spatial_embed: (n_stations, hidden_dim)
+            spatial_embed: (n_stations, hidden_dim) or (batch, n_stations, hidden_dim)
         """
-        
+
         device = lat.device
-        n_stations = lat.shape[0]
-        
-        # Convert direction to circular representation
-        wind_dir_rad = torch.deg2rad(wind_direction_deg)
-        wind_cos = torch.cos(wind_dir_rad)
-        wind_sin = torch.sin(wind_dir_rad)
-        
-        # Stack all spatial features
-        spatial_features = torch.stack([lat, lon, wind_cos, wind_sin], dim=1)
-        # Shape: (n_stations, 4)
-        
-        # Project to hidden space
-        spatial_proj = self.spatial_projection(spatial_features)
-        # Shape: (n_stations, hidden_dim)
-        
-        # Add station-specific embeddings (learnable offsets)
-        spatial_embed = spatial_proj + self.station_embeddings
-        
-        return spatial_embed
+
+        # Support batched or non-batched inputs
+        is_batched = lat.dim() == 2
+
+        if is_batched:
+            # lat, lon, wind_direction_deg: (B, N)
+            B, N = lat.shape
+            wind_dir_rad = torch.deg2rad(wind_direction_deg)
+            wind_cos = torch.cos(wind_dir_rad)
+            wind_sin = torch.sin(wind_dir_rad)
+
+            spatial_features = torch.stack([lat, lon, wind_cos, wind_sin], dim=-1)
+            # (B, N, 4)
+
+            spatial_proj = self.spatial_projection(spatial_features)
+            # (B, N, hidden_dim)
+
+            # station_embeddings: (N, hidden_dim) -> (1, N, hidden_dim)
+            emb = self.station_embeddings.unsqueeze(0)
+            spatial_embed = spatial_proj + emb
+            return spatial_embed
+        else:
+            n_stations = lat.shape[0]
+            # Convert direction to circular representation
+            wind_dir_rad = torch.deg2rad(wind_direction_deg)
+            wind_cos = torch.cos(wind_dir_rad)
+            wind_sin = torch.sin(wind_dir_rad)
+
+            # Stack all spatial features
+            spatial_features = torch.stack([lat, lon, wind_cos, wind_sin], dim=1)
+            # Shape: (n_stations, 4)
+
+            # Project to hidden space
+            spatial_proj = self.spatial_projection(spatial_features)
+            # Shape: (n_stations, hidden_dim)
+
+            # Add station-specific embeddings (learnable offsets)
+            spatial_embed = spatial_proj + self.station_embeddings
+
+            return spatial_embed
