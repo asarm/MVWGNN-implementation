@@ -3,25 +3,31 @@ from torch import nn
 import torch.nn.functional as F
 from temporalEncoder import TemporalEncoder
 from adjLearner import DynamicAdjacencyLearner
+from taskAwareAdjLearner import TaskAwareAdjacencyLearner
 from positionalEncoding import SpatialPositionalEncoding
 from directionalGAT import DirectionalGAT
 from cyclicEncoder import CyclicTemporalEncoding
+from crossAttentionFusion import CrossAttentionFusion
 
 class DDGNNWind(nn.Module):
     """
-    V3: Enhanced DDGNN with:
+    V4: Enhanced DDGNN with:
     - Attention-based temporal encoding
-    - Dynamic adjacency learning (spatial + temporal)
+    - Task-aware dynamic adjacency learning (wind pattern based)
+    - Cross-attention feature fusion (instead of simple addition)
     - Better gradient flow
     """
     
     def __init__(self, n_stations=50, hidden_dim=64, n_heads=4, 
-                 seq_len=24, n_gnn_layers=2, input_dim=5, temporal_debug: bool = False):
+                 seq_len=24, n_gnn_layers=2, input_dim=5, temporal_debug: bool = False,
+                 use_task_aware_adj: bool = True, use_cross_attention: bool = True):
         super().__init__()
         
         self.n_stations = n_stations
         self.hidden_dim = hidden_dim
         self.input_dim = input_dim
+        self.use_task_aware_adj = use_task_aware_adj
+        self.use_cross_attention = use_cross_attention
         
         # ========== ENCODERS ==========
         self.cyclic_encoder = CyclicTemporalEncoding(
@@ -42,16 +48,36 @@ class DDGNNWind(nn.Module):
             n_stations=n_stations
         )
         
+        # ========== CROSS-ATTENTION FUSION ==========
+        # V4: Cross-attention instead of simple addition
+        if self.use_cross_attention:
+            self.feature_fusion = CrossAttentionFusion(
+                hidden_dim=hidden_dim,
+                n_heads=n_heads,
+                dropout=0.1
+            )
+        
         # ========== DYNAMIC GRAPH LEARNING ==========
-        # V2: Uses both spatial and temporal features
-        self.adjacency_learner = DynamicAdjacencyLearner(
-            hidden_dim=hidden_dim,
-            n_stations=n_stations,
-            embedding_dim=64,
-            sparsify_mode='top_p',
-            nucleus_p=0.9,
-            temperature_scale=0.2
-        )
+        # V4: Task-aware adjacency that uses wind patterns
+        if self.use_task_aware_adj:
+            self.adjacency_learner = TaskAwareAdjacencyLearner(
+                hidden_dim=hidden_dim,
+                n_stations=n_stations,
+                embedding_dim=64,
+                sparsify_mode='top_p',
+                nucleus_p=0.9,
+                temperature_scale=0.2
+            )
+        else:
+            # Fallback to V3 adjacency learner
+            self.adjacency_learner = DynamicAdjacencyLearner(
+                hidden_dim=hidden_dim,
+                n_stations=n_stations,
+                embedding_dim=64,
+                sparsify_mode='top_p',
+                nucleus_p=0.9,
+                temperature_scale=0.2
+            )
         
         # ========== GNN LAYERS ==========
         self.gnn_layers = nn.ModuleList([
@@ -118,16 +144,32 @@ class DDGNNWind(nn.Module):
             else:
                 cyc = cyclic_embed
 
-            node_repr = temporal_features + spatial_embed + cyc
+            # V4: Use cross-attention fusion or fallback to addition
+            if self.use_cross_attention:
+                node_repr = self.feature_fusion(temporal_features, spatial_embed, cyc)
+            else:
+                node_repr = temporal_features + spatial_embed + cyc
             
             # =========== STAGE 4: Learn DYNAMIC adjacency ===========
-            # Key change: use BOTH spatial and temporal
-            adjacency = self.adjacency_learner(
-                spatial_features=spatial_embed,
-                temporal_features=temporal_features,
-                positions=positions, 
-                wind_directions=wind_direction_deg
-            )
+            # V4: Task-aware adjacency with current wind speeds
+            # Extract current wind speed (last timestep)
+            current_wind = historical_data[:, -1, 0].unsqueeze(-1)  # (N, 1)
+            
+            if self.use_task_aware_adj:
+                adjacency = self.adjacency_learner(
+                    spatial_features=spatial_embed,
+                    temporal_features=temporal_features,
+                    positions=positions, 
+                    wind_directions=wind_direction_deg,
+                    current_wind_speeds=current_wind
+                )
+            else:
+                adjacency = self.adjacency_learner(
+                    spatial_features=spatial_embed,
+                    temporal_features=temporal_features,
+                    positions=positions, 
+                    wind_directions=wind_direction_deg
+                )
 
             # =========== STAGE 5: Apply GNN with PRE-NORM ===========
             gnn_output = node_repr
@@ -151,15 +193,31 @@ class DDGNNWind(nn.Module):
                 cyc = cyclic_embed
             cyc = cyc.unsqueeze(1)
 
-            node_repr = temporal_features + spatial_embed + cyc
+            # V4: Use cross-attention fusion or fallback to addition
+            if self.use_cross_attention:
+                node_repr = self.feature_fusion(temporal_features, spatial_embed, cyc)
+            else:
+                node_repr = temporal_features + spatial_embed + cyc
 
             # Dynamic adjacency (batched)
-            adjacency = self.adjacency_learner(
-                spatial_features=spatial_embed,
-                temporal_features=temporal_features,
-                positions=positions, 
-                wind_directions=wind_direction_deg
-            )
+            # V4: Extract current wind speeds
+            current_wind = historical_data[:, :, -1, 0].unsqueeze(-1)  # (B, N, 1)
+            
+            if self.use_task_aware_adj:
+                adjacency = self.adjacency_learner(
+                    spatial_features=spatial_embed,
+                    temporal_features=temporal_features,
+                    positions=positions, 
+                    wind_directions=wind_direction_deg,
+                    current_wind_speeds=current_wind
+                )
+            else:
+                adjacency = self.adjacency_learner(
+                    spatial_features=spatial_embed,
+                    temporal_features=temporal_features,
+                    positions=positions, 
+                    wind_directions=wind_direction_deg
+                )
 
             # GNN (batched)
             gnn_output = node_repr
