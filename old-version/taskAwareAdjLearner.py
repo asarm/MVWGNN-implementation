@@ -16,7 +16,7 @@ class TaskAwareAdjacencyLearner(DynamicAdjacencyLearner):
     """
     
     def __init__(self, hidden_dim=64, n_stations=50, embedding_dim=32,
-                 sparsify_mode: str = "top_p", nucleus_p: float = 0.9,
+                 sparsify_mode: str = "top_p", nucleus_p: float = 0.5,
                  temperature_scale: float = 0.2):
         super().__init__(
             hidden_dim=hidden_dim,
@@ -161,11 +161,6 @@ class TaskAwareAdjacencyLearner(DynamicAdjacencyLearner):
         # ========== STEP 6: Normalize ==========
         # Ensure adjacency is properly normalized
         refined_adj = self._normalize_adjacency(refined_adj)
-        
-        # Debug: Print blend weight occasionally
-        if torch.rand(1).item() < 0.01:
-            print(f"[TaskAwareAdj] Blend weight alpha: {alpha.item():.3f} "
-                  f"(base: {1-alpha.item():.3f}, wind: {alpha.item():.3f})")
         
         return refined_adj
     

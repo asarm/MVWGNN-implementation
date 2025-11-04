@@ -47,12 +47,14 @@ def load_data(dataName="hourly-data"):
         }
 
         # Impute missing values
+        '''
         for feature_name, df in features.items():
             data_array = df[city_names].values  # shape (T, n_stations)
             imputer = KNNImputer(n_neighbors=5)
             imputed_array = imputer.fit_transform(data_array)
             features[feature_name][city_names] = imputed_array
-
+        '''
+        
         # Prepare a dictionary for MultiIndex columns
         data = {}
         for city in city_names:

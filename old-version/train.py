@@ -7,23 +7,38 @@ from tqdm import tqdm
 import os
 import matplotlib.pyplot as plt
 
-# Magnitude analysis tools
-from magnitude_analysis import analyze_adjacency_magnitudes
-from magnitude_quick_check import add_magnitude_hooks, quick_magnitude_check
+# ============================================================================
+# V5 TRAINING: ALL FIXES APPLIED
+# ============================================================================
+# Changes from V3.1:
+# 1. ✅ Model: PatchTST + GATv2 (modern architecture)
+# 2. ✅ hidden_dim: 128 → 64 (reduced capacity)
+# 3. ✅ seq_len: 48 → 24 (shorter sequences)
+# 4. ✅ weight_decay: 5e-5 → 0.001 (stronger regularization)
+# 5. ✅ dropout: 0.1-0.25 → 0.35 (higher)
+# 6. ✅ batch_size: consistent 16 for train/val
+# 7. ✅ EMA: exponential moving average for stability
+# 8. ✅ nucleus_p: 0.9 → 0.85 (less aggressive sparsification)
+# ============================================================================
 
 df, cities = load_data("hourly-data")
 datetime_index = df.index
 print(df.sample(5))
 print("n stations:", len(cities))
-hours = datetime_index.hour.tolist()
-day_of_years = datetime_index.dayofyear.tolist()
 
 first_city_name = cities['City'].iloc[1]
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 n_stations = len(cities)
-seq_len = 48
-hidden_dim = 128 
+
+# =========== CRITICAL HYPERPARAMETER CHANGES ===========
+seq_len = 24        # 48 → 24: Shorter sequences
+hidden_dim = 64     # 128 → 64: Reduce capacity
+batch_size = 16     # 32 → 16: Smaller batches, consistent train/val
+patch_len = 4       # NEW: For PatchTST (24/4 = 6 patches)
+dropout = 0.35      # 0.1-0.25 → 0.35: Stronger regularization
+# =======================================================
+
 train_size = int(0.8 * len(df))
 epochNum = 100
 
@@ -32,7 +47,6 @@ num_horizons = len(prediction_horizons)
 
 horizon_weights = torch.tensor([1.0], device=device)  
 horizon_weights = horizon_weights / horizon_weights.sum()
-print(f"Horizon weights: {horizon_weights.cpu().numpy()}")
 
 train_dataset = GraphWeatherDataset(
     df=df.iloc[:train_size],
@@ -49,40 +63,69 @@ test_dataset = GraphWeatherDataset(
     prediction_window=max(prediction_horizons),
     sliding_window=True
 )
-train_loader = create_dataloader(train_dataset, batch_size=32, shuffle=True)
-val_loader = create_dataloader(test_dataset, batch_size=1, shuffle=False)
 
+# =========== CONSISTENT BATCH SIZE ===========
+train_loader = create_dataloader(train_dataset, batch_size=batch_size, shuffle=True)
+val_loader = create_dataloader(test_dataset, batch_size=batch_size, shuffle=False)
+# ============================================
+
+# =========== V5 MODEL: PatchTST + GATv2 ===========
 model = DDGNNWind(
     n_stations=n_stations,
     hidden_dim=hidden_dim,
     n_heads=4,
     seq_len=seq_len,
     n_gnn_layers=2,
-    temporal_debug=False
+    temporal_debug=False,
+    use_task_aware_adj=True,
+    use_cross_attention=True,
+    dropout=dropout,
+    patch_len=patch_len  # NEW parameter
 ).to(device)
+# =================================================
 
-# Add magnitude analysis hooks
-add_magnitude_hooks(model)
-print("[INFO] Magnitude analysis hooks registered")
+# ============ EMA for Model Stability ============
+class EMA:
+    """Exponential Moving Average for model parameters"""
+    def __init__(self, model, decay=0.999):
+        self.model = model
+        self.decay = decay
+        self.shadow = {}
+        self.backup = {}
+        
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = param.data.clone()
+    
+    def update(self):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                new_average = (1.0 - self.decay) * param.data + self.decay * self.shadow[name]
+                self.shadow[name] = new_average.clone()
+    
+    def apply_shadow(self):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                self.backup[name] = param.data
+                param.data = self.shadow[name]
+    
+    def restore(self):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                param.data = self.backup[name]
+        self.backup = {}
+
+ema = EMA(model, decay=0.999)
+print("[INFO] EMA initialized")
+# ================================================
 
 total_params = sum(p.numel() for p in model.parameters())
 trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"Total parameters: {total_params:,}")
 print(f"Trainable parameters: {trainable_params:,}")
 
-def criterion_multi_horizon(output, target, horizon_weights, model=None, l2_lambda=1e-4):
-    """Compute weighted MAE loss across multiple horizons with L2 regularization.
-    
-    Using MAE instead of MSE because:
-    - MAE treats all errors equally (no squaring)
-    - More robust to outliers
-    - Direct optimization of the metric we care about
-    
-    L2 regularization (weight decay):
-    - Prevents overfitting by penalizing large weights
-    - Encourages smoother, more generalizable solutions
-    - lambda=1e-4 is a small penalty (won't dominate the loss)
-    """
+def criterion_multi_horizon(output, target, horizon_weights, model=None, l2_lambda=0.001):
+    """Compute weighted MAE loss with STRONGER L2 regularization."""
     mae_per_sample = torch.abs(output - target)
     
     if mae_per_sample.dim() == 3:
@@ -92,7 +135,7 @@ def criterion_multi_horizon(output, target, horizon_weights, model=None, l2_lamb
     
     weighted_loss = (mae_per_horizon * horizon_weights).sum()
     
-    # Add L2 regularization on model parameters
+    # Stronger L2 regularization
     if model is not None and l2_lambda > 0:
         l2_reg = torch.tensor(0., device=output.device)
         for param in model.parameters():
@@ -102,29 +145,30 @@ def criterion_multi_horizon(output, target, horizon_weights, model=None, l2_lamb
     
     return weighted_loss, mae_per_horizon
 
-# Use L1Loss (MAE) instead of MSELoss for evaluation
 criterion = torch.nn.L1Loss(reduction='none')
 
-# V3.1 CRITICAL FIX: Much longer warmup + slower decay
-optimizer = torch.optim.AdamW(model.parameters(), 
-                              lr=0.0015,  # 0.002 → 0.0015 (more conservative)
-                              weight_decay=5e-5,  # 1e-4 → 5e-5 (less regularization)
-                              betas=(0.9, 0.999))
+# ============ STRONGER REGULARIZATION ============
+optimizer = torch.optim.AdamW(
+    model.parameters(), 
+    lr=0.001,              # Conservative starting LR
+    weight_decay=0.001,    # 5e-5 → 0.001 (20x stronger!)
+    betas=(0.9, 0.999)
+)
+# =================================================
 
-# CRITICAL: 50% warmup (not 30%), longer total epochs
 scheduler = torch.optim.lr_scheduler.OneCycleLR(
     optimizer,
-    max_lr=0.0015,
-    epochs=epochNum,  # 25 → 40 (give more time)
+    max_lr=0.001,
+    epochs=epochNum,
     steps_per_epoch=len(train_loader),
-    pct_start=0.5,  # 0.3 → 0.5 (50% warmup!)
+    pct_start=0.3,
     anneal_strategy='cos',
-    div_factor=10,  # Start LR = max_lr / 10
-    final_div_factor=100  # End LR = max_lr / 100
+    div_factor=25,
+    final_div_factor=1000
 )
 
 stop_counter = 0
-patience = 10  # 7 → 10
+patience = 15
 
 os.makedirs("checkpoints", exist_ok=True)
 os.makedirs("results", exist_ok=True)
@@ -134,7 +178,7 @@ val_loss_history = []
 val_mae_history = []
 val_horizon_mae_history = {f'horizon_{h}h_mae': [] for h in prediction_horizons}
 best_val_loss = float('inf')
-best_val_mae = float('inf')  # Track best MAE separately
+best_val_mae = float('inf')
 
 def train_epoch(model, epoch):
     model.train()
@@ -187,16 +231,15 @@ def train_epoch(model, epoch):
             positions,
         )
 
-        # CRITICAL FIX: Rescale predictions and targets to original scale before computing loss
-        # This ensures the model learns to minimize errors in real-world units (m/s), not z-scores
         output_original = output * scaler_scale.unsqueeze(0).unsqueeze(-1) + scaler_mean.unsqueeze(0).unsqueeze(-1)
         target_original = target * scaler_scale.unsqueeze(0).unsqueeze(-1) + scaler_mean.unsqueeze(0).unsqueeze(-1)
         
-        # MAE loss with L2 regularization (lambda=1e-4)
+        # Stronger L2 regularization
         weighted_loss, mae_per_horizon = criterion_multi_horizon(
             output_original, target_original, horizon_weights, 
-            model=model, l2_lambda=1e-4
+            model=model, l2_lambda=0.001
         )
+        
         weighted_loss.backward()
         
         # Gradient clipping
@@ -204,6 +247,9 @@ def train_epoch(model, epoch):
         
         optimizer.step()
         scheduler.step()
+        
+        # Update EMA
+        ema.update()
 
         loss_val = weighted_loss.item()
         total_loss += loss_val * b
@@ -211,7 +257,7 @@ def train_epoch(model, epoch):
         for i, h in enumerate(prediction_horizons):
             horizon_losses_sum[f'horizon_{h}h'] += mae_per_horizon[i].item() * b
 
-    avg_loss = total_loss / (len(train_loader.dataset))
+    avg_loss = total_loss / len(train_loader.dataset)
     current_lr = optimizer.param_groups[0]['lr']
     print(f"Epoch {epoch}, Training MAE: {avg_loss:.6f}, LR: {current_lr:.6f}")
     
@@ -221,7 +267,12 @@ def train_epoch(model, epoch):
     
     return avg_loss
 
-def eval_model(model, data_loader):
+def eval_model(model, data_loader, use_ema=True):
+    """Evaluate with EMA weights"""
+    
+    if use_ema:
+        ema.apply_shadow()
+    
     model.eval()
     total_loss = 0.0
     total_mae = 0.0
@@ -300,6 +351,9 @@ def eval_model(model, data_loader):
     avg_loss = total_loss / total_samples
     avg_mae = total_mae / total_samples
     
+    if use_ema:
+        ema.restore()
+    
     import numpy as np
     for h in prediction_horizons:
         first_city_predictions[h] = np.concatenate(first_city_predictions[h])
@@ -317,12 +371,25 @@ def eval_model(model, data_loader):
 
 
 # Training loop
+print("\n" + "="*60)
+print("STARTING V5 TRAINING")
+print("="*60)
+print(f"Key changes:")
+print(f"  - Architecture: PatchTST + GATv2")
+print(f"  - hidden_dim: 128 → {hidden_dim}")
+print(f"  - seq_len: 48 → {seq_len}")
+print(f"  - weight_decay: 5e-5 → 0.001")
+print(f"  - dropout: 0.1-0.25 → {dropout}")
+print(f"  - batch_size: consistent {batch_size}")
+print(f"  - EMA: enabled")
+print("="*60 + "\n")
+
 for epoch in range(1, epochNum):
     train_loss = train_epoch(model, epoch)
     train_loss_history.append(train_loss)
 
     if epoch > 0 and epoch % 1 == 0:
-        val_loss, val_mae, first_city_preds, first_city_targs, avg_horizon_maes = eval_model(model, val_loader)
+        val_loss, val_mae, first_city_preds, first_city_targs, avg_horizon_maes = eval_model(model, val_loader, use_ema=True)
         val_loss_history.append(val_loss)
         val_mae_history.append(val_mae)
         
@@ -350,21 +417,22 @@ for epoch in range(1, epochNum):
                 axes[idx].legend(fontsize=9)
                 axes[idx].grid(True, alpha=0.3)
             
-            plt.suptitle(f'V3.1 Model - Epoch {epoch} - Predictions for {first_city_name}', fontsize=14, fontweight='bold')
+            plt.suptitle(f'V5 Model (PatchTST+GATv2) - Epoch {epoch} - {first_city_name}', fontsize=14, fontweight='bold')
             plt.tight_layout()
-            pred_plot_path = os.path.join("results", f"prediction_v3.1_epoch_{epoch:03d}.png")
+            pred_plot_path = os.path.join("results", f"prediction_v5_epoch_{epoch:03d}.png")
             plt.savefig(pred_plot_path, dpi=150, bbox_inches='tight')
             plt.close()
             print(f"✓ Saved prediction plot to {pred_plot_path}")
         
-        # Save best model based on MAE (not loss!)
+        # Save best model
         if val_mae < best_val_mae:
             best_val_mae = val_mae
-            best_val_loss = val_loss  # Update for reference
-            checkpoint_path = os.path.join("checkpoints", "best_model_v3.1.pth")
+            best_val_loss = val_loss
+            checkpoint_path = os.path.join("checkpoints", "best_model_v5.pth")
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
+                'ema_shadow': ema.shadow,
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
                 'train_loss': train_loss,
@@ -372,13 +440,20 @@ for epoch in range(1, epochNum):
                 'val_mae': val_mae,
                 'best_val_mae': best_val_mae,
                 'best_val_loss': best_val_loss,
+                'config': {
+                    'hidden_dim': hidden_dim,
+                    'seq_len': seq_len,
+                    'patch_len': patch_len,
+                    'dropout': dropout,
+                    'weight_decay': 0.001
+                }
             }, checkpoint_path)
-            print(f"✓ Saved best model with validation MAE: {best_val_mae:.6f} (loss: {val_loss:.6f})")
+            print(f"✓ Saved best V5 model with validation MAE: {best_val_mae:.6f}")
             stop_counter = 0
         else:
             stop_counter += 1
             if stop_counter >= patience:
-                print(f"Early stopping triggered after {patience} epochs without MAE improvement.")
+                print(f"Early stopping triggered after {patience} epochs without improvement.")
                 break
 
 # Save loss history
@@ -398,31 +473,33 @@ for h_name, h_mae_list in val_horizon_mae_history.items():
     val_df[h_name] = h_mae_list
 
 loss_df = loss_df.merge(val_df, on='epoch', how='left')
-loss_df.to_csv('results/loss_history_v3.1.csv', index=False)
-print(f"✓ Saved loss history to results/loss_history_v3.1.csv")
+loss_df.to_csv('results/loss_history_v5.csv', index=False)
+print(f"✓ Saved loss history to results/loss_history_v5.csv")
 
-# Plot MAE curves (training and validation)
+# Plot MAE curves
 plt.figure(figsize=(12, 6))
 plt.plot(range(1, len(train_loss_history) + 1), train_loss_history, 'b-o', label='Train MAE', linewidth=2, markersize=4, alpha=0.8)
 if val_mae_history:
     plt.plot(val_epochs, val_mae_history, 'r-s', label='Validation MAE', linewidth=2, markersize=4, alpha=0.8)
     
-    # Mark the best validation MAE point
     best_epoch = val_epochs[val_mae_history.index(min(val_mae_history))]
     plt.axhline(y=best_val_mae, color='green', linestyle='--', linewidth=1.5, alpha=0.5, label=f'Best Val MAE: {best_val_mae:.4f}')
     plt.scatter([best_epoch], [best_val_mae], color='green', s=100, zorder=5, marker='*', edgecolors='darkgreen', linewidths=1.5)
 
 plt.xlabel('Epoch', fontsize=12)
 plt.ylabel('MAE (m/s)', fontsize=12)
-plt.title('V3.1 Model - Training and Validation MAE History', fontsize=14, fontweight='bold')
+plt.title('V5 Model (PatchTST+GATv2) - Training and Validation MAE History', fontsize=14, fontweight='bold')
 plt.legend(fontsize=11, loc='upper right')
 plt.grid(True, alpha=0.3, linestyle=':')
 plt.tight_layout()
-plt.savefig('results/mae_history_v3.1.png', dpi=300, bbox_inches='tight')
-print(f"✓ Saved MAE plot to results/mae_history_v3.1.png")
+plt.savefig('results/mae_history_v5.png', dpi=300, bbox_inches='tight')
+print(f"✓ Saved MAE plot to results/mae_history_v5.png")
 plt.close()
 
-print(f"\n=== V3.1 Training Complete ===")
+print(f"\n{'='*60}")
+print(f"V5 TRAINING COMPLETE")
+print(f"{'='*60}")
 print(f"Best validation MAE: {best_val_mae:.6f}")
 print(f"Best validation loss: {best_val_loss:.6f}")
-print(f"Best model saved to: checkpoints/best_model_v3.1.pth")
+print(f"Best model saved to: checkpoints/best_model_v5.pth")
+print(f"{'='*60}\n")
