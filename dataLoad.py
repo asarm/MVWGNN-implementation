@@ -59,7 +59,7 @@ def load_data(dataName="hourly-data"):
         data = {}
         for city in city_names:
             for feature, df in features.items():
-                data[(city, feature)] = df[city]
+                data[(city, feature)] = df[city].interpolate(method='linear', limit_direction='both')
 
         df = pd.DataFrame(data)
         df.columns = pd.MultiIndex.from_tuples(df.columns)
