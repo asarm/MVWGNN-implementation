@@ -43,7 +43,8 @@ pip install -r requirements.txt
 ### 2. USA-Wind (Kaggle Dataset)
 - 30 weather stations across USA/Canada
 - Time span: 2012-2017
-- Data files in `data/`
+- Download data from https://www.kaggle.com/datasets/selfishgene/historical-hourly-weather-data
+- Place data files in `data/` following the same format as `ceda_data/`
 
 Each CSV file should have:
 - `datetime` column
