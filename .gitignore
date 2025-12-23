@@ -37,10 +37,10 @@ env/
 *~
 
 # Data
-data/
-ceda_data/
-*.csv
-!city_attributes.csv  # Keep city attributes as example
+# data/
+# ceda_data/
+# *.csv
+# !city_attributes.csv  # Keep city attributes as example
 
 # Model checkpoints and logs
 checkpoints/
