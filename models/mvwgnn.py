@@ -1,18 +1,3 @@
-"""
-Multi-View Wind Graph Neural Network (MVWGNN)
-
-Reference:
-    Multi-View Graph Neural Networks for Wind Speed Forecasting
-    [Your Paper Citation Here]
-
-This implementation follows the architecture described in the paper:
-1. Feature encoding with temporal positional embeddings
-2. GRU-based temporal modeling
-3. Multi-view graph construction (Geographic, Feature Similarity, Wind Propagation)
-4. Semantic attention-based view fusion
-5. MLP prediction head
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
