@@ -4,10 +4,7 @@ import torch.nn.functional as F
 from graph_layers import (
     GeographicMetapath,
     FeatureSimilarityMetapath,
-    # FeatureSimilarityMetapathV2,  # COMMENTED OUT for trial
     MultiTemporalWindMetapath,
-    # MultiTemporalWindMetapath2,  # COMMENTED OUT for trial
-    # CrossFeatureSpatialMetapath2,  # COMMENTED OUT for trial
     MetapathFusion
 )
 import numpy as np
