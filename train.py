@@ -3,7 +3,6 @@ Training script for MVWGNN (Multi-View Wind Graph Neural Network)
 
 Reference:
     Multi-View Graph Neural Networks for Wind Speed Forecasting
-    [Your Paper Citation Here]
 """
 
 import torch
