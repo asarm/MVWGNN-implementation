@@ -134,9 +134,3 @@ python train.py \
 - Dataset sources:
   - UK-Wind: [CEDA UK Met Office Database](https://data.ceda.ac.uk/)
   - USA-Wind: [Kaggle Historical Hourly Weather Data](https://www.kaggle.com/datasets/selfishgene/historical-hourly-weather-data)
-
----
-
-## Contact
-
-For questions or issues, please open an issue on GitHub or contact [ma1339@exeter.ac.uk].
