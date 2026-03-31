@@ -3,7 +3,7 @@
 Official implementation of **Multi-View Graph Neural Networks for Wind Speed Forecasting**
 ---
 
-<img src="figures/mwvgnn_figure.png" alt="MVWGNN Architecture" width="800"/>
+<img src="figures/mwvgnn_figure.png" alt="MVWGNN Architecture Figure" width="800"/>
 
 ## Overview
 
