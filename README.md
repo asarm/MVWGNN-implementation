@@ -3,6 +3,8 @@
 Official implementation of **Multi-View Graph Neural Networks for Wind Speed Forecasting**
 ---
 
+<img src="figures/mwvgnn_figure.png" alt="MVWGNN Architecture" width="800"/>
+
 ## Overview
 
 MVWGNN is a graph neural network framework for multi-station wind speed forecasting that integrates three complementary graph views:
@@ -129,8 +131,9 @@ python train.py \
 
 ---
 
-## Acknowledgments
-
 - Dataset sources:
   - UK-Wind: [CEDA UK Met Office Database](https://data.ceda.ac.uk/)
   - USA-Wind: [Kaggle Historical Hourly Weather Data](https://www.kaggle.com/datasets/selfishgene/historical-hourly-weather-data)
+
+
+<img src="figures/scatter_inference_large.jpeg" alt="Inference Time" width="500"/>
