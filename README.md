@@ -1,6 +1,16 @@
 # MVWGNN: Multi-View Wind Graph Neural Network
 
 Official implementation of **Multi-View Graph Neural Networks for Wind Speed Forecasting**
+
+If you find this repo helpful, please cite:
+
+@article{asar2026multi,
+  title={Multi-view graph neural networks for off-grid wind speed forecasting},
+  author={Asar, Mert Arda and Zhou, Zhou and Prathyush, Purushothama and Dawkins, Laura},
+  year={2026},
+  publisher={University of Exeter}
+}
+
 ---
 
 <img src="figures/mwvgnn_figure.png" alt="MVWGNN Architecture Figure" width="800"/>
